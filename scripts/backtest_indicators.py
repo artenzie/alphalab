@@ -66,7 +66,7 @@ def run(db_path: Path, n_sessions: int = 57) -> dict:
         agent = registry.get_agent(agent_id)
         cash, shares = START_VALUE, {}
         r = {"name": registry.NAMES[agent_id], "decisions": 0, "orders": 0, "opens_closes": 0, "resizes": 0,
-             "targets": [], "positions": [], "max_gross": 0.0}
+             "targets": [], "positions": [], "max_gross": 0.0, "max_shorts": 0}
         for snap, c in zip(snaps, contexts):
             px = {s: f["last_close"] for s, f in snap.payload["symbols"].items()}
             value = cash + sum(q * px[s] for s, q in shares.items())
@@ -84,6 +84,7 @@ def run(db_path: Path, n_sessions: int = 57) -> dict:
                 shares = new
                 cash = value - sum(q * px[s] for s, q in shares.items())
             r["positions"].append(len(shares))
+            r["max_shorts"] = max(r["max_shorts"], sum(q < 0 for q in shares.values()))
         report["agents"][agent_id] = r
     return report
 
@@ -92,11 +93,11 @@ def format_report(report: dict) -> str:
     s = report["sessions"]
     lines = [f"{len(s)} sessions {s[0]} .. {s[-1]} ({report['weeks']} week starts), backtest snapshots",
              f"{'#':>2}  {'agent':<22} {'decisions':>9} {'orders':>7} {'open/close':>10} {'resize':>7} "
-             f"{'avg pos':>8} {'max pos':>8} {'max gross':>9}"]
+             f"{'avg pos':>8} {'max pos':>8} {'max short':>9} {'max gross':>9}"]
     for agent_id, r in report["agents"].items():
         pos = r["positions"]
         lines.append(f"{agent_id:>2}  {r['name']:<22} {r['decisions']:>9} {r['orders']:>7} {r['opens_closes']:>10} "
-                     f"{r['resizes']:>7} {sum(pos) / len(pos):>8.1f} {max(pos):>8} {r['max_gross']:>9.0%}")
+                     f"{r['resizes']:>7} {sum(pos) / len(pos):>8.1f} {max(pos):>8} {r['max_shorts']:>9} {r['max_gross']:>9.0%}")
     return "\n".join(lines)
 
 
