@@ -72,3 +72,42 @@ The rule is fixed now, before the shakedown data exists, so the decision can't b
 **Why.** Fairest comparison: any difference between AI and rules comes from how they *use* the same information, not from extra information. It's also cheapest, and avoids news timestamps, which are the easiest way to leak future data.
 
 **Possible later experiment:** a second run that adds news, as an "information tier" study. Not in this run.
+
+---
+
+## D6 · Decision frequency
+
+**Decided:** Sat 14 Nov 2026 · **Status:** accepted
+
+**Decision.** Every agent decides **once per trading day, after the close**, and fills at the next day's open. No intraday trading.
+
+**Why.** Intraday trading would need the engine to work perfectly during the school day (14:30–21:00 UK), would multiply AI API costs about 26 times, needs better data than the free IEX feed, and makes the no-future-data rule much harder to prove. Daily decisions keep the experiment cheap, clean and reliable.
+
+---
+
+## D7 · Crypto side experiment
+
+**Decided:** Sat 14 Nov 2026 · **Status:** accepted; details fixed at Gate 1
+
+**Decision.** Run a small crypto side experiment alongside the main one, on the same engine and dashboard, but **reported separately**, never ranked against the 14 equity agents:
+
+| Agent | What it does |
+|---|---|
+| C0 · Bitcoin benchmark | Buys BTC on day 1 and holds (the control) |
+| C1 · AI crypto trader (Claude) | Trades a small set of large coins, long only, aiming for the highest return it can |
+
+**Why separate.** Crypto trades 24/7, can't be shorted or traded on margin at Alpaca, and is far more volatile, so its numbers aren't comparable with the equity agents. **Why a benchmark.** Without C0 there's no way to tell whether C1 added anything beyond "crypto went up" or "crypto went down".
+
+**In the paper:** a short side note comparing C1 with C0.
+
+---
+
+## D8 · How we reach the AI models
+
+**Decided:** Sat 14 Nov 2026 · **Status:** accepted
+
+**Decision.** All models are called through **OpenRouter**: one account, one key, one prepaid balance and one spend limit, owned by a parent. Each model is **pinned to its official provider** (Anthropic, OpenAI, Google, Moonshot) with fallbacks to other hosts turned off, so every call goes to the real model from its maker.
+
+**Why.** One sign-up instead of four, one bill and one cap. The 5.5% credit fee is under a dollar a month at our spend. If OpenRouter is down, every AI agent holds that day, which affects all models equally.
+
+**Revisit if:** OpenRouter can't pin a model to its official provider, or its outages cost more than a few days during the shakedown.
