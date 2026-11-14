@@ -2,7 +2,7 @@
 
 import json
 import sys
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -34,40 +34,78 @@ def api_error(status):
                     SimpleNamespace(response=resp, request=None))
 
 
+def utc(dt):
+    """alpaca-py stores request times as naive UTC."""
+    return None if dt is None else (dt.replace(tzinfo=UTC) if dt.tzinfo is None else dt)
+
+
+def in_window(bars, req):
+    """Bars whose timestamp falls in [req.start, req.end], like Alpaca does."""
+    start, end = utc(req.start), utc(req.end)
+    return [b for b in bars if (start is None or b.timestamp >= start)
+            and (end is None or b.timestamp <= end)]
+
+
+def weekdays(start, end):
+    d, out = start, []
+    while d <= end:
+        if d.weekday() < 5:
+            out.append(d)
+        d += timedelta(days=1)
+    return out
+
+
 class FakeTrading:
-    def __init__(self, untradable=()):
+    def __init__(self, untradable=(), sessions=None):
         self.untradable = set(untradable)
+        self.sessions = sessions  # None: every weekday is a session
+        self.calendar_requests = []
 
     def get_asset(self, sym):
         return SimpleNamespace(symbol=sym, tradable=sym not in self.untradable, status="AssetStatus.ACTIVE")
 
+    def get_calendar(self, req):
+        self.calendar_requests.append(req)
+        days = weekdays(req.start, req.end) if self.sessions is None else \
+            [d for d in self.sessions if req.start <= d <= req.end]
+        return [SimpleNamespace(date=d) for d in days]
+
 
 class FakeStock:
-    def __init__(self, raw, split, failures=()):
+    def __init__(self, raw, split, failures=(), fail_after=None):
         self.data = {"raw": raw, "split": split}
         self.failures = list(failures)
+        self.fail_after = fail_after  # raise HTTP 403 on every call after this many
         self.calls = 0
+        self.requests = []
 
     def get_stock_bars(self, req):
         self.calls += 1
         if self.failures:
             raise self.failures.pop(0)
-        return SimpleNamespace(data=self.data[req.adjustment.value])
+        if self.fail_after is not None and self.calls > self.fail_after:
+            raise api_error(403)
+        self.requests.append(req)
+        data = self.data[req.adjustment.value]
+        return SimpleNamespace(data={s: in_window(b, req) for s, b in data.items()})
 
 
 class FakeCrypto:
     def __init__(self, data):
         self.data = data
+        self.requests = []
 
     def get_crypto_bars(self, req):
-        return SimpleNamespace(data=self.data)
+        self.requests.append(req)
+        return SimpleNamespace(data={s: in_window(b, req) for s, b in self.data.items()})
 
 
-def clients(raw=None, split=None, crypto=None, failures=(), untradable=()):
+def clients(raw=None, split=None, crypto=None, failures=(), untradable=(), sessions=None, fail_after=None):
     raw = {"AAPL": [bar(EQ_TS)]} if raw is None else raw
     split = raw if split is None else split
     crypto = {"BTC/USD": [bar(CR_TS, close=70000.0)]} if crypto is None else crypto
-    return ingest.Clients(FakeTrading(untradable), FakeStock(raw, split, failures), FakeCrypto(crypto))
+    return ingest.Clients(FakeTrading(untradable, sessions), FakeStock(raw, split, failures, fail_after),
+                          FakeCrypto(crypto))
 
 
 @pytest.fixture
@@ -233,3 +271,189 @@ def test_heartbeat_started_and_finished_with_counts(conn):
     assert len({r["run_id"] for r in rows}) == 1 and rows[0]["job"] == "fetch_prices"
     fin = events(conn)[-1][1]
     assert fin["totals"] == {"fetched": 2, "inserted": 2, "unchanged": 0, "rejected_unclosed": 0}
+
+
+# --- backfill: chunking ----------------------------------------------------
+
+def utc_dt(*a):
+    return datetime(*a, tzinfo=UTC)
+
+
+def test_chunk_ranges_split_by_year_without_overlap():
+    chunks = ingest.chunk_ranges(utc_dt(2024, 11, 1), utc_dt(2026, 11, 14, 22))
+    assert chunks == [
+        (utc_dt(2024, 11, 1), utc_dt(2024, 12, 31, 23, 59, 59)),
+        (utc_dt(2025, 1, 1), utc_dt(2025, 12, 31, 23, 59, 59)),
+        (utc_dt(2026, 1, 1), utc_dt(2026, 11, 14, 22)),
+    ]
+    for (_, end), (nxt, _) in zip(chunks, chunks[1:]):
+        assert end < nxt
+
+
+def test_chunk_ranges_within_one_year_and_empty():
+    assert ingest.chunk_ranges(utc_dt(2026, 11, 9), utc_dt(2026, 11, 14)) == \
+        [(utc_dt(2026, 11, 9), utc_dt(2026, 11, 14))]
+    assert ingest.chunk_ranges(utc_dt(2026, 11, 14), utc_dt(2026, 11, 14)) == []
+    assert ingest.chunk_ranges(utc_dt(2026, 11, 15), utc_dt(2026, 11, 14)) == []
+
+
+# Bars on both sides of each year boundary; equity at 05:00Z (midnight ET).
+BF_EQ = [utc_dt(2024, 11, 1, 5), utc_dt(2024, 12, 31, 5), utc_dt(2025, 1, 2, 5),
+         utc_dt(2025, 12, 31, 5), utc_dt(2026, 1, 2, 5), utc_dt(2026, 11, 13, 5)]
+BF_CR = [utc_dt(2024, 11, 1), utc_dt(2024, 12, 31), utc_dt(2025, 1, 1), utc_dt(2026, 1, 1),
+         utc_dt(2026, 11, 13)]
+
+
+def backfill(conn, cl, now=AFTER_ALL, sleeps=None):
+    sleeps = [] if sleeps is None else sleeps
+    return ingest.run(conn, cl, now=now if callable(now) else (lambda: now), sleep=sleeps.append,
+                      equity_symbols=["AAPL"], crypto_symbols=("BTC/USD",),
+                      start_date=date(2024, 11, 1))
+
+
+def bf_clients(**kw):
+    return clients(raw={"AAPL": [bar(t) for t in BF_EQ]},
+                   crypto={"BTC/USD": [bar(t, close=70000.0) for t in BF_CR]}, **kw)
+
+
+def test_backfill_fetches_each_chunk_and_stores_everything(conn):
+    cl = bf_clients()
+    sleeps = []
+    assert backfill(conn, cl, sleeps=sleeps) == 0
+    # 3 yearly chunks x (raw + split) stock requests, 3 crypto requests
+    assert len(cl.stock.requests) == 6 and len(cl.crypto.requests) == 3
+    starts = [utc(r.start) for r in cl.crypto.requests]
+    ends = [utc(r.end) for r in cl.crypto.requests]
+    assert starts == [utc_dt(2024, 11, 1), utc_dt(2025, 1, 1), utc_dt(2026, 1, 1)]
+    assert ends[:2] == [utc_dt(2024, 12, 31, 23, 59, 59), utc_dt(2025, 12, 31, 23, 59, 59)]
+    assert sleeps == [ingest.CHUNK_PAUSE] * 2  # pause between chunks only, no retries
+    stored = {(r["symbol"], r["bar_date"]) for r in prices(conn)}
+    assert len(prices(conn)) == len(stored) == len(BF_EQ) + len(BF_CR)  # each bar once
+    started = events(conn)[0][1]
+    assert started["mode"] == "backfill" and len(started["chunks"]) == 3
+    assert len(events(conn)[-1][1]["fetched_at_by_chunk"]) == 3
+
+
+def test_backfill_rerun_inserts_nothing(conn):
+    clock = Clock(AFTER_ALL)
+    assert backfill(conn, bf_clients(), now=clock) == 0
+    assert backfill(conn, bf_clients(), now=clock) == 0
+    finished = [d for e, d in events(conn) if e == "finished"]
+    assert [f["totals"]["inserted"] for f in finished] == [11, 0]
+
+
+def test_backfill_failure_in_later_chunk_keeps_earlier_chunks(conn):
+    cl = bf_clients(fail_after=4)  # chunks 1 and 2 succeed, chunk 3 gets HTTP 403
+    assert backfill(conn, cl) == 1
+    dates = sorted(r["bar_date"] for r in prices(conn))
+    assert dates and max(dates) < "2026-01-01"
+    ev, detail = events(conn)[-1]
+    assert ev == "error" and detail["chunks_stored"] == 2 and "HTTP 403" in detail["error"]
+
+
+def test_start_after_now_is_an_error(conn):
+    rc = ingest.run(conn, clients(), now=lambda: AFTER_ALL, sleep=lambda s: None,
+                    equity_symbols=["AAPL"], crypto_symbols=("BTC/USD",), start_date=date(2026, 11, 15))
+    assert rc == 1 and "not before now" in events(conn)[-1][1]["error"]
+
+
+# --- coverage / gap report -------------------------------------------------
+
+def d(s):
+    return date.fromisoformat(s)
+
+
+def test_date_ranges_group_consecutive_expected_days():
+    expected = ["2026-11-05", "2026-11-06", "2026-11-09", "2026-11-10", "2026-11-12"]
+    # Fri 6 and Mon 9 are consecutive sessions -> one range; 12 is separate
+    assert ingest.date_ranges(["2026-11-06", "2026-11-09", "2026-11-12"], expected) == \
+        ["2026-11-06..2026-11-09", "2026-11-12"]
+
+
+def test_symbol_coverage_no_gaps():
+    exp = ["2026-11-09", "2026-11-10", "2026-11-11"]
+    r = ingest.symbol_coverage(exp, exp)
+    assert (r["first"], r["last"], r["bars"]) == ("2026-11-09", "2026-11-11", 3)
+    assert not r["late_start"] and r["gaps"] == [] and r["unexpected"] == []
+
+
+def test_symbol_coverage_late_start_middle_gap_and_missing_tail():
+    exp = ["2026-11-02", "2026-11-03", "2026-11-04", "2026-11-05", "2026-11-06"]
+    r = ingest.symbol_coverage(["2026-11-03", "2026-11-05"], exp)
+    assert r["late_start"] and r["missing_before_first"] == 1
+    assert r["gaps"] == ["2026-11-04", "2026-11-06"]  # middle gap and missing last day
+    assert r["gap_ranges"] == ["2026-11-04", "2026-11-06"]
+
+
+def test_symbol_coverage_no_bars_at_all():
+    r = ingest.symbol_coverage([], ["2026-11-02"])
+    assert r["first"] is None and r["bars"] == 0 and r["late_start"] and r["gaps"] == []
+
+
+def test_expected_equity_days_uses_calendar_and_closed_rule():
+    # Mon 9 .. Fri 13 Nov 2026; Wed 11 dropped as a fake holiday
+    sessions = [d("2026-11-09"), d("2026-11-10"), d("2026-11-12"), d("2026-11-13")]
+    cl = clients(sessions=sessions)
+    before_close = utc_dt(2026, 11, 13, 20, 59)  # 15:59 ET Fri
+    days = ingest.expected_equity_days(cl, d("2026-11-09"), before_close, lambda s: None)
+    assert days == ["2026-11-09", "2026-11-10", "2026-11-12"]
+    after = ingest.expected_equity_days(cl, d("2026-11-09"), AFTER_ALL, lambda s: None)
+    assert after[-1] == "2026-11-13"
+
+
+def test_expected_crypto_days_are_every_closed_calendar_day():
+    days = ingest.expected_crypto_days(d("2026-11-12"), utc_dt(2026, 11, 14, 23, 59))
+    assert days == ["2026-11-12", "2026-11-13"]  # 14 Nov not closed yet
+    assert ingest.expected_crypto_days(d("2026-11-14"), utc_dt(2026, 11, 14, 12)) == []
+
+
+def test_run_reports_gaps_not_weekends_or_holidays(conn):
+    # Sessions Mon 2 .. Fri 13 Nov except Wed 11 (holiday). AAPL misses Thu 5.
+    sessions = [x for x in weekdays(d("2026-11-02"), d("2026-11-13")) if x != d("2026-11-11")]
+    eq = [bar(datetime(x.year, x.month, x.day, 5, tzinfo=UTC)) for x in sessions if x != d("2026-11-05")]
+    # BTC every day 2..13 Nov except Sun 8
+    cr_days = [d("2026-11-02") + timedelta(days=i) for i in range(12)]
+    cr = [bar(datetime(x.year, x.month, x.day, tzinfo=UTC)) for x in cr_days if x != d("2026-11-08")]
+    cl = clients(raw={"AAPL": eq}, crypto={"BTC/USD": cr}, sessions=sessions)
+    rc = ingest.run(conn, cl, now=lambda: AFTER_ALL, sleep=lambda s: None, equity_symbols=["AAPL"],
+                    crypto_symbols=("BTC/USD",), start_date=d("2026-11-02"))
+    assert rc == 0
+    cov = events(conn)[-1][1]["coverage"]
+    assert cov["AAPL"]["gap_ranges"] == ["2026-11-05"]  # weekends and the holiday aren't gaps
+    assert cov["AAPL"]["bars"] == 8 and cov["AAPL"]["expected"] == 9
+    assert cov["BTC/USD"]["gap_ranges"] == ["2026-11-08"]  # a weekend day is a crypto gap
+    assert cov["BTC/USD"]["expected"] == 12 and not cov["BTC/USD"]["late_start"]
+    assert events(conn)[-1][1]["flagged"] == ["AAPL", "BTC/USD"]
+
+
+def test_run_reports_late_start(conn):
+    sessions = weekdays(d("2026-11-02"), d("2026-11-13"))
+    eq = [bar(datetime(x.year, x.month, x.day, 5, tzinfo=UTC)) for x in sessions if x >= d("2026-11-09")]
+    cl = clients(raw={"AAPL": eq}, crypto={}, sessions=sessions)
+    ingest.run(conn, cl, now=lambda: AFTER_ALL, sleep=lambda s: None, equity_symbols=["AAPL"],
+               crypto_symbols=(), start_date=d("2026-11-02"))
+    cov = events(conn)[-1][1]["coverage"]["AAPL"]
+    assert cov["late_start"] and cov["first"] == "2026-11-09" and cov["gap_ranges"] == []
+
+
+def test_format_report_lists_flagged_symbols():
+    exp = ["2026-11-02", "2026-11-03", "2026-11-04"]
+    rep = {"AAPL": {"asset_class": "us_equity", **ingest.symbol_coverage(exp, exp)},
+           "NEM": {"asset_class": "us_equity", **ingest.symbol_coverage(["2026-11-03"], exp)}}
+    text = ingest.format_report(rep, d("2026-11-02"))
+    assert "NEM: starts 2026-11-03" in text and "NEM: 1 missing days: 2026-11-04" in text
+    assert "AAPL:" not in text
+
+
+# --- CLI -------------------------------------------------------------------
+
+def test_cli_start_and_days_are_exclusive(capsys):
+    with pytest.raises(SystemExit):
+        ingest.main(["--start", "2024-11-01", "--days", "5"])
+
+
+def test_cli_rejects_bad_start_date(capsys):
+    with pytest.raises(SystemExit):
+        ingest.main(["--start", "2024-13-01"])
+    with pytest.raises(SystemExit):
+        ingest.main(["--start", "2999-01-01"])

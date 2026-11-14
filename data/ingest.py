@@ -10,7 +10,18 @@ Bars for days that haven't closed yet are never stored (CLAUDE.md rule 1):
   * crypto bar starting at T (00:00 UTC): only once it's T + 24h
 
 Usage:
-    python -m data.ingest --days 5
+    python -m data.ingest --days 5              # recent bars (daily job)
+    python -m data.ingest --start 2024-11-01    # backfill from a date
+
+Backfill uses the same fetch, closed-bar, versioning and retry rules. The
+window is split into calendar-year chunks (3 API calls each, a short pause
+between them), each stored in its own transaction with its own fetched_at,
+so a failure keeps the chunks already stored and a re-run is a no-op for them.
+
+After storing, a coverage report lists per symbol the first and last date,
+the bar count, a late start, and gaps: missing NYSE sessions (Alpaca trading
+calendar) for equities, missing calendar days for crypto. Gaps are reported,
+never filled.
 
 Every run writes heartbeat rows (job 'fetch_prices'): started, then finished
 (with counts) or error. API keys are read from .env and never printed.
@@ -27,7 +38,7 @@ import sys
 import time
 import uuid
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable
 from zoneinfo import ZoneInfo
@@ -45,6 +56,9 @@ EQUITY_CLOSE_HOUR = 16  # 16:00 ET; conservative on early-close days
 
 # Waits between attempts: 3 attempts over ~2 minutes.
 RETRY_DELAYS = (30, 90)
+
+# Pause between backfill chunks (seconds); keeps us far below 200 calls/min.
+CHUNK_PAUSE = 1.0
 
 VALUE_FIELDS = (
     "open", "high", "low", "close", "volume",
@@ -256,6 +270,137 @@ def store(conn: sqlite3.Connection, rows: list[dict], fetched_at: str, stats) ->
 
 
 # ---------------------------------------------------------------------------
+# Chunking
+# ---------------------------------------------------------------------------
+
+def chunk_ranges(start: datetime, end: datetime) -> list[tuple[datetime, datetime]]:
+    """Split [start, end] into calendar-year chunks (UTC) that never overlap.
+
+    Each chunk ends 1 s before the next one starts; the last ends at `end`.
+    Empty if start >= end.
+    """
+    start, end = as_utc(start), as_utc(end)
+    out = []
+    cur = start
+    while cur < end:
+        nxt = datetime(cur.year + 1, 1, 1, tzinfo=timezone.utc)
+        out.append((cur, min(nxt - timedelta(seconds=1), end)))
+        cur = nxt
+    return out
+
+
+# ---------------------------------------------------------------------------
+# Coverage report (gaps are listed, never filled)
+# ---------------------------------------------------------------------------
+
+def _as_date(v) -> date:
+    if isinstance(v, datetime):
+        return v.date()
+    if isinstance(v, date):
+        return v
+    return date.fromisoformat(str(v)[:10])
+
+
+def expected_equity_days(clients: Clients, start: date, now: datetime, sleep) -> list[str]:
+    """NYSE sessions from `start` whose close (16:00 ET) has passed at `now`."""
+    from alpaca.trading.requests import GetCalendarRequest
+
+    req = GetCalendarRequest(start=start, end=as_utc(now).astimezone(NY).date())
+    cal = with_retries(lambda: clients.trading.get_calendar(req), "trading calendar", sleep)
+    days = []
+    for c in cal:
+        d = _as_date(c.date)
+        if d >= start and now >= datetime(d.year, d.month, d.day, EQUITY_CLOSE_HOUR, tzinfo=NY):
+            days.append(d.isoformat())
+    return sorted(set(days))
+
+
+def expected_crypto_days(start: date, now: datetime) -> list[str]:
+    """Every calendar day from `start` whose 00:00 UTC bar has closed at `now`."""
+    last = as_utc(now).date() - timedelta(days=1)
+    n = (last - start).days + 1
+    return [(start + timedelta(days=i)).isoformat() for i in range(max(n, 0))]
+
+
+def date_ranges(dates: list[str], expected: list[str]) -> list[str]:
+    """Group dates that are consecutive in `expected` into 'a..b' ranges."""
+    pos = {d: i for i, d in enumerate(expected)}
+    out: list[list[str]] = []
+    prev = None
+    for d in sorted(dates, key=lambda x: pos.get(x, -1)):
+        i = pos.get(d)
+        if out and i is not None and prev is not None and i == prev + 1:
+            out[-1][1] = d
+        else:
+            out.append([d, d])
+        prev = i
+    return [a if a == b else f"{a}..{b}" for a, b in out]
+
+
+def symbol_coverage(stored: list[str], expected: list[str]) -> dict:
+    """Compare stored bar dates with expected ones for one symbol."""
+    stored = sorted(set(stored))
+    have, exp = set(stored), set(expected)
+    first = stored[0] if stored else None
+    missing = sorted(exp - have)
+    before = [d for d in missing if first is None or d < first]
+    gaps = [d for d in missing if first is not None and d > first]
+    return {
+        "first": first,
+        "last": stored[-1] if stored else None,
+        "bars": len(stored),
+        "expected": len(expected),
+        "late_start": bool(before),
+        "missing_before_first": len(before),
+        "gaps": gaps,
+        "gap_ranges": date_ranges(gaps, expected),
+        "unexpected": sorted(have - exp),  # bars on days we didn't expect (not filled or dropped)
+    }
+
+
+def stored_dates(conn: sqlite3.Connection, symbol: str, start: date) -> list[str]:
+    rows = conn.execute("SELECT DISTINCT bar_date FROM prices WHERE symbol = ? AND bar_date >= ? "
+                        "ORDER BY bar_date", (symbol, start.isoformat()))
+    return [r[0] for r in rows]
+
+
+def coverage_report(conn, clients: Clients, equity_symbols, crypto_symbols,
+                    start: date, now: datetime, sleep) -> dict[str, dict]:
+    eq_days = expected_equity_days(clients, start, now, sleep) if equity_symbols else []
+    cr_days = expected_crypto_days(start, now)
+    report = {}
+    for sym in equity_symbols:
+        report[sym] = {"asset_class": "us_equity", **symbol_coverage(stored_dates(conn, sym, start), eq_days)}
+    for sym in crypto_symbols:
+        report[sym] = {"asset_class": "crypto", **symbol_coverage(stored_dates(conn, sym, start), cr_days)}
+    return report
+
+
+def flagged(report: dict[str, dict]) -> dict[str, dict]:
+    return {s: r for s, r in report.items() if r["late_start"] or r["gaps"] or r["unexpected"]}
+
+
+def format_report(report: dict[str, dict], start: date) -> str:
+    lines = [f"Coverage from {start.isoformat()}:",
+             f"{'symbol':<10} {'first':<10}  {'last':<10}  {'bars':>5} {'expected':>8}  late  gaps"]
+    for sym, r in report.items():
+        lines.append(f"{sym:<10} {r['first'] or '-':<10}  {r['last'] or '-':<10}  {r['bars']:>5} "
+                     f"{r['expected']:>8}  {'yes' if r['late_start'] else 'no':<4}  {len(r['gaps'])}")
+    bad = flagged(report)
+    if not bad:
+        lines.append("No late starts, gaps or unexpected days.")
+    for sym, r in bad.items():
+        if r["late_start"]:
+            lines.append(f"  {sym}: starts {r['first'] or 'never'}, "
+                         f"{r['missing_before_first']} expected days before its first bar")
+        if r["gaps"]:
+            lines.append(f"  {sym}: {len(r['gaps'])} missing days: {', '.join(r['gap_ranges'])}")
+        if r["unexpected"]:
+            lines.append(f"  {sym}: bars on unexpected days: {', '.join(r['unexpected'])}")
+    return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
 # Run
 # ---------------------------------------------------------------------------
 
@@ -309,44 +454,79 @@ def run(conn: sqlite3.Connection, clients: Clients, days: int = 5,
         now: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
         sleep: Callable[[float], None] = time.sleep,
         equity_symbols: list[str] | None = None,
-        crypto_symbols=CRYPTO_SYMBOLS) -> int:
-    """One ingestion run. Returns a process exit code (0 ok, 1 error)."""
+        crypto_symbols=CRYPTO_SYMBOLS,
+        start_date: date | None = None,
+        chunk_pause: float = CHUNK_PAUSE) -> int:
+    """One ingestion run. Returns a process exit code (0 ok, 1 error).
+
+    With `start_date`, backfill from that date (00:00 UTC) instead of `days`.
+    """
     run_id = uuid.uuid4().hex
     equity_symbols = equity_symbols if equity_symbols is not None else load_universe()
     start_now = now()
-    start = (start_now - timedelta(days=days)).replace(hour=0, minute=0, second=0, microsecond=0)
-    heartbeat(conn, run_id, "started", {"days": days, "start": db.utc_ts(start),
-                                        "equity": len(equity_symbols), "crypto": len(crypto_symbols)})
+    if start_date is None:
+        start = (start_now - timedelta(days=days)).replace(hour=0, minute=0, second=0, microsecond=0)
+    else:
+        start = datetime(start_date.year, start_date.month, start_date.day, tzinfo=timezone.utc)
+    chunks = chunk_ranges(start, start_now)
+    heartbeat(conn, run_id, "started", {
+        "mode": "recent" if start_date is None else "backfill",
+        "days": days if start_date is None else None, "start": db.utc_ts(start),
+        "chunks": [[db.utc_ts(a), db.utc_ts(b)] for a, b in chunks],
+        "equity": len(equity_symbols), "crypto": len(crypto_symbols)})
     stats = Stats()
+    fetched_ats: list[str] = []
     try:
+        if not chunks:
+            raise IngestError(f"start {db.utc_ts(start)} is not before now")
         check_crypto_assets(clients, crypto_symbols, sleep)
-        eq_raw, eq_split = fetch_equity(clients, equity_symbols, start, start_now, sleep)
-        cr = fetch_crypto(clients, crypto_symbols, start, start_now, sleep)
-        rows = build_rows(eq_raw, eq_split, cr, now(), stats)
-        fetched_at = db.utc_ts(now())
-        store(conn, rows, fetched_at, stats)
+        for i, (a, b) in enumerate(chunks):
+            if i:
+                sleep(chunk_pause)
+            eq_raw, eq_split = fetch_equity(clients, equity_symbols, a, b, sleep)
+            cr = fetch_crypto(clients, crypto_symbols, a, b, sleep)
+            rows = build_rows(eq_raw, eq_split, cr, now(), stats)
+            fetched_at = db.utc_ts(now())
+            store(conn, rows, fetched_at, stats)
+            fetched_ats.append(fetched_at)
+            if len(chunks) > 1:
+                print(f"  chunk {i + 1}/{len(chunks)} {a.date()}..{b.date()}: {len(rows)} closed bars")
         missing = [s for s in list(equity_symbols) + list(crypto_symbols) if s not in stats.per_symbol]
+        report = coverage_report(conn, clients, equity_symbols, crypto_symbols, start.date(), now(), sleep)
     except Exception as exc:  # noqa: BLE001 - every failure becomes an error heartbeat
         err = str(exc) if isinstance(exc, IngestError) else describe(exc)
-        heartbeat(conn, run_id, "error", {"error": err, "counts": stats.totals()})
+        heartbeat(conn, run_id, "error", {"error": err, "counts": stats.totals(),
+                                          "chunks_stored": len(fetched_ats)})
         print(f"ERROR: {err}", file=sys.stderr)
         return 1
-    heartbeat(conn, run_id, "finished", {"fetched_at": fetched_at, "totals": stats.totals(),
-                                         "per_symbol": stats.per_symbol, "no_bars": missing})
+    coverage = {s: {k: r[k] for k in ("first", "last", "bars", "expected", "late_start", "gap_ranges",
+                                      "unexpected")} for s, r in report.items()}
+    heartbeat(conn, run_id, "finished", {"fetched_at": fetched_at, "fetched_at_by_chunk": fetched_ats,
+                                         "totals": stats.totals(), "per_symbol": stats.per_symbol,
+                                         "no_bars": missing, "coverage": coverage,
+                                         "flagged": sorted(flagged(report))})
     t = stats.totals()
     print(f"run {run_id}: fetched {t['fetched']}, inserted {t['inserted']}, "
           f"unchanged {t['unchanged']}, rejected (unclosed) {t['rejected_unclosed']}"
           + (f"; no bars for {missing}" if missing else ""))
+    print(format_report(report, start.date()))
     return 0
 
 
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(description="Fetch daily bars from Alpaca into the prices table.")
-    p.add_argument("--days", type=int, default=5, help="look back N calendar days (default 5)")
+    when = p.add_mutually_exclusive_group()
+    when.add_argument("--days", type=int, default=None, help="look back N calendar days (default 5)")
+    when.add_argument("--start", type=date.fromisoformat, default=None, metavar="YYYY-MM-DD",
+                      help="backfill from this date to the latest closed bar")
     p.add_argument("--db", default=str(db.DEFAULT_DB_PATH), help="database path")
     args = p.parse_args(argv)
+    if args.days is None:
+        args.days = 5
     if args.days < 1:
         p.error("--days must be >= 1")
+    if args.start is not None and args.start >= datetime.now(timezone.utc).date():
+        p.error("--start must be before today (UTC)")
     conn = db.init_db(args.db)
     try:
         try:
@@ -355,7 +535,7 @@ def main(argv: list[str] | None = None) -> int:
             heartbeat(conn, uuid.uuid4().hex, "error", {"error": str(exc)})
             print(f"ERROR: {exc}", file=sys.stderr)
             return 1
-        return run(conn, clients, days=args.days)
+        return run(conn, clients, days=args.days, start_date=args.start)
     finally:
         conn.close()
 
