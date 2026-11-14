@@ -1,6 +1,6 @@
 # Experiment protocol
 
-**Version:** v1.0, Sat 14 Nov 2026 (Gate 1)
+**Version:** v1.1, Sat 14 Nov 2026 (Gate 1 + crypto timings)
 **Next:** final freeze as `protocol-v2.0` on Sun 10 Jan 2027, after the shakedown. Final freeze as `protocol-v2.0` on Sun 10 Jan 2027, after the shakedown.
 
 All numbers were approved at the Gate 1 review on Sat 14 Nov 2026. The universe and model lineup were filled in from the Gate 1 scripts the same evening. Everything follows from decisions D1–D9 in `research/decisions.md`.
@@ -217,6 +217,7 @@ Reported separately. Never ranked or tested against the equity agents.
 | Coins | BTC, ETH, SOL, XRP, DOGE against USD (Alpha Arena's set minus BNB). Availability on Alpaca confirmed in Phase 1 |
 | Capital | $100,000 each |
 | Decisions | Once a day after the 00:00 UTC daily bar closes; filled at the next available price |
+| Daily timings (UTC) | Every day, after the bar for day D closes at 00:00Z on D+1: **00:05Z** pull the final daily bars; **00:10Z** build and store the snapshot; **00:15Z** C0/C1 decide. UTC is used throughout, so US/UK clock changes don't move these times |
 | C1 limits | Long only (Alpaca crypto can't be shorted or bought on margin); max 50% in one coin; may hold cash |
 | C1 instruction | Aim for the highest return it can within the limits |
 | C1 sees | The same kind of snapshot as the equity agents (returns, moving averages, volatility, z-scores) for the 5 coins, plus its own portfolio |
@@ -228,3 +229,4 @@ Reported separately. Never ranked or tested against the equity agents.
 - **v0.1** · Sat 14 Nov 2026 · First draft from decisions D1–D5.
 - **v0.2** · Sat 14 Nov 2026 · Gate 1 numbers approved. Applied D6 (daily only), D7 (crypto side experiment, new §13), D8 (OpenRouter, provider pinning), D9 (five models; Grok added as agent 12, DeepSeek replaces Kimi as 11; agents 12–14 renumbered 13–15). Margin interest set to Alpaca's 6.5%. Agent 7 may hold all cash; AI agents aren't told about other agents.
 - **v1.0** · Sat 14 Nov 2026 · Gate 1. Universe frozen (22 stocks + SPY). Model lineup: Claude Sonnet 5.5, GPT-6.1 Sol, Gemini 4 Carbon, DeepSeek V4 Pro, Grok 4.7, matched on price tier; reasoning at default/medium.
+- **v1.1** · Sat 14 Nov 2026 · Crypto daily timings fixed (fetch 00:05Z, snapshot 00:10Z, decide 00:15Z), added to §13.
