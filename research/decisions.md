@@ -45,7 +45,7 @@ The rule is fixed now, before the shakedown data exists, so the decision can't b
 
 **Decided:** Sat 14 Nov 2026 · **Status:** accepted
 
-**Decision.** The official run starts **Mon 11 Jan 2027** and runs **12 weeks, to Fri 2 Apr 2027** (about 60 trading days).
+**Decision.** The official run starts **Mon 11 Jan 2027** and runs **12 weeks, to Fri 2 Apr 2027** (57 trading days by the NYSE calendar).
 
 **Why.** That's the first full trading week after returning in January, after the shakedown has proven the system. Twelve weeks is long enough to see behaviour across different market days. It is **not** long enough to prove one strategy beats another, so the paper leads with behaviour, reasoning and effect sizes with confidence intervals, not "AI wins".
 

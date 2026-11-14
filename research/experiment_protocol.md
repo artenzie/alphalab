@@ -1,7 +1,7 @@
 # Experiment protocol
 
 **Version:** v1.1, Sat 14 Nov 2026 (Gate 1 + crypto timings)
-**Next:** final freeze as `protocol-v2.0` on Sun 10 Jan 2027, after the shakedown. Final freeze as `protocol-v2.0` on Sun 10 Jan 2027, after the shakedown.
+**Next:** final freeze as `protocol-v2.0` on Sun 10 Jan 2027, after the shakedown.
 
 All numbers were approved at the Gate 1 review on Sat 14 Nov 2026. The universe and model lineup were filled in from the Gate 1 scripts the same evening. Everything follows from decisions D1–D9 in `research/decisions.md`.
 
@@ -13,7 +13,7 @@ Fifteen equity agents (6 rule-based, 9 AI) each start with the same virtual capi
 
 | Item | Value |
 |---|---|
-| Official run | Mon 11 Jan 2027 – Fri 2 Apr 2027 (12 weeks, ~60 trading days) |
+| Official run | Mon 11 Jan 2027 – Fri 2 Apr 2027 (12 weeks, 57 trading days; Good Friday 26 Mar 2027 is a market holiday) |
 | Shakedown | Mon 14 Dec 2026 – Fri 8 Jan 2027, same configuration, data thrown away |
 | Market | US equities, NYSE calendar |
 | Starting capital | $100,000 per agent, USD |
@@ -230,3 +230,4 @@ Reported separately. Never ranked or tested against the equity agents.
 - **v0.2** · Sat 14 Nov 2026 · Gate 1 numbers approved. Applied D6 (daily only), D7 (crypto side experiment, new §13), D8 (OpenRouter, provider pinning), D9 (five models; Grok added as agent 12, DeepSeek replaces Kimi as 11; agents 12–14 renumbered 13–15). Margin interest set to Alpaca's 6.5%. Agent 7 may hold all cash; AI agents aren't told about other agents.
 - **v1.0** · Sat 14 Nov 2026 · Gate 1. Universe frozen (22 stocks + SPY). Model lineup: Claude Sonnet 5.5, GPT-6.1 Sol, Gemini 4 Carbon, DeepSeek V4 Pro, Grok 4.7, matched on price tier; reasoning at default/medium.
 - **v1.1** · Sat 14 Nov 2026 · Crypto daily timings fixed (fetch 00:05Z, snapshot 00:10Z, decide 00:15Z), added to §13.
+- **v1.1 (clerical)** · Sat 14 Nov 2026 · Removed a repeated sentence; trading-day count corrected to 57 from the cached calendar. No rule changed.
