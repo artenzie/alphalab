@@ -152,6 +152,7 @@ AI agents are not told what other agents exist or how they are doing.
 | Access | All models through OpenRouter (D8), each **pinned to its official provider with fallbacks off**: Anthropic, OpenAI, Google, DeepSeek, xAI |
 | Models | Claude, GPT, Gemini, DeepSeek, Grok (D9), chosen at **one price tier** (about $2 per million input tokens) rather than each maker's most expensive model, so cost doesn't decide the comparison |
 | Model IDs | `anthropic/claude-sonnet-5.5` (Anthropic) · `openai/gpt-6.1-sol` (OpenAI) · `google/gemini-4-carbon` (Google) · `deepseek/deepseek-v4-pro-0813` (DeepSeek) · `x-ai/grok-4.7` (xAI). Checked by `scripts/test_pinned.py` |
+| Data policy | OpenRouter's account setting allows providers that may keep or train on prompts, because DeepSeek's own API is one of them. Prompts contain only public market data and the prompt wording; nothing personal. Every other model is pinned to its maker, so this setting changes nothing for them |
 | Reasoning | Each model's default reasoning setting; where a level must be chosen, **medium**. No "pro"/extended modes. The setting used is logged with every call |
 | Agents 7, 13, 14, 15 and C1 | Same Claude model version as agent 8 |
 | Temperature | 0 where the model allows it; otherwise the provider default, recorded |
@@ -204,7 +205,7 @@ Artem starts and stops the official run himself, never Claude Code.
 
 ## 12 · Gate 1 record
 
-Gate 1 was held on Sat 14 Nov 2026. All numbers approved; universe built by rule (§2); model lineup fixed (§8) and checked with every model served by its own maker. Tagged `protocol-v1.0`.
+Gate 1 was held on Sat 14 Nov 2026. All numbers approved; universe built by rule (§2); model lineup fixed (§8) and checked with `scripts/test_pinned.py`: all five served by their own maker (Anthropic, OpenAI, Google, DeepSeek, xAI). Tagged `protocol-v1.0`.
 
 ## 13 · Crypto side experiment (D7)
 
