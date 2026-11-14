@@ -39,7 +39,7 @@ IN_SPY = Portfolio(cash=0.0, positions={"SPY": 130.0}, value=100_000.0)
 IN_STOCKS = Portfolio(cash=0.0, positions={s: 10.0 for s in STOCKS}, value=100_000.0)
 
 
-def make_snapshot(d: date, symbols=UNIVERSE, n=30) -> Snapshot:
+def make_snapshot(d: date, symbols=UNIVERSE, n=120) -> Snapshot:
     bars = {s: tuple(Bar((d - timedelta(days=n - i)).isoformat(), 100 + i, 101 + i, 99 + i, 100 + i, 1e6)
                      for i in range(n)) for s in sorted(symbols)}
     hist = sha256(canonical_json({s: [list(b) for b in bars[s]] for s in bars}))
@@ -229,7 +229,8 @@ def test_equal_weight_uses_only_snapshot_symbols():
 # Isolation: an agent sees only the snapshot, portfolio and context it's given
 # ---------------------------------------------------------------------------
 
-AGENT_MODULES = [ROOT / "strategies" / "benchmark.py", ROOT / "strategies" / "equal_weight.py"]
+AGENT_MODULES = sorted(p for p in (ROOT / "strategies").glob("*.py")
+                       if p.stem not in {"__init__", "base", "registry"})
 ALLOWED_IMPORTS = {"__future__", "strategies.base"}
 
 
@@ -298,7 +299,9 @@ def test_snapshot_has_no_connection():
 
 
 def test_registry():
-    assert dict(registry.AGENTS) == {1: benchmark.decide, 2: equal_weight.decide}
+    assert sorted(registry.AGENTS) == [1, 2, 3, 4, 5, 6]
+    assert registry.AGENTS[1] is benchmark.decide and registry.AGENTS[2] is equal_weight.decide
+    assert len(AGENT_MODULES) == len(registry.AGENTS)
     with pytest.raises(KeyError):
         registry.get_agent(99)
     with pytest.raises(TypeError):

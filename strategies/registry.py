@@ -4,18 +4,14 @@ from __future__ import annotations
 
 from types import MappingProxyType
 
-from strategies import benchmark, equal_weight
+from strategies import benchmark, equal_weight, long_short, mean_reversion, momentum, trend
 from strategies.base import Agent
 
-AGENTS: MappingProxyType[int, Agent] = MappingProxyType({
-    benchmark.AGENT_ID: benchmark.decide,
-    equal_weight.AGENT_ID: equal_weight.decide,
-})
+_MODULES = (benchmark, equal_weight, momentum, mean_reversion, trend, long_short)
 
-NAMES: MappingProxyType[int, str] = MappingProxyType({
-    benchmark.AGENT_ID: benchmark.NAME,
-    equal_weight.AGENT_ID: equal_weight.NAME,
-})
+AGENTS: MappingProxyType[int, Agent] = MappingProxyType({m.AGENT_ID: m.decide for m in _MODULES})
+NAMES: MappingProxyType[int, str] = MappingProxyType({m.AGENT_ID: m.NAME for m in _MODULES})
+assert len(AGENTS) == len(_MODULES), "duplicate agent id"
 
 
 def get_agent(agent_id: int) -> Agent:

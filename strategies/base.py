@@ -114,3 +114,26 @@ def build_context(decision_date: date, run_sessions: Sequence[date]) -> Context:
 
 
 Agent = Callable[["Snapshot", Portfolio, Context], Decision]
+
+
+# ---------------------------------------------------------------------------
+# Helpers for the indicator agents (3-6)
+# ---------------------------------------------------------------------------
+
+BENCHMARK_SYMBOL = "SPY"
+
+
+def stock_fields(snapshot: "Snapshot") -> dict[str, dict]:
+    """Snapshot fields per stock: every snapshot symbol except SPY (protocol §5)."""
+    symbols = snapshot.payload["symbols"]       # one parse; a fresh copy, safe to keep
+    return {s: f for s, f in symbols.items() if s != BENCHMARK_SYMBOL}
+
+
+def rank(fields: Mapping[str, Mapping], key: str) -> list[str]:
+    """Stocks by fields[s][key], highest first, ties by symbol (A first); missing values left out."""
+    have = [s for s, f in fields.items() if f.get(key) is not None]
+    return sorted(have, key=lambda s: (-fields[s][key], s))
+
+
+def holds_any(portfolio: Portfolio, symbols) -> bool:
+    return any(portfolio.holds(s) for s in symbols)
