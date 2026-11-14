@@ -1,6 +1,6 @@
 # Experiment protocol
 
-**Version:** v1.2, Sat 14 Nov 2026 (Gate 1 + crypto timings + day-1 decisions)
+**Version:** v1.3, Sat 14 Nov 2026 (Gate 1 + crypto timings + day-1 decisions + agent 4/5 clarifications)
 **Next:** final freeze as `protocol-v2.0` on Sun 10 Jan 2027, after the shakedown.
 
 All numbers were approved at the Gate 1 review on Sat 14 Nov 2026. The universe and model lineup were filled in from the Gate 1 scripts the same evening. Everything follows from decisions D1–D9 in `research/decisions.md`.
@@ -97,8 +97,8 @@ All agents output **target weights** (fraction of current portfolio value per sy
 | 1 | Benchmark (SPY) | Day 1 only | 100% SPY, held for the whole run |
 | 2 | Equal-weight hold | First trading day of each month | 1/22 in each stock |
 | 3 | Momentum | First trading day of each week | Top 5 stocks by 63-day return, 20% each |
-| 4 | Mean reversion | Daily | Long when z ≤ −1.5, short when z ≥ +1.5, exit when z crosses 0; 10% per position |
-| 5 | Trend (MA crossover) | Daily | Equal weight in every stock whose 20-day MA is above its 100-day MA; the rest in cash |
+| 4 | Mean reversion | Daily | Long when z ≤ −1.5, short when z ≥ +1.5, exit a long when z ≥ 0, a short when z ≤ 0; 10% per position. Open positions that aren't exiting keep their 10% target. If nothing enters or exits, it holds |
+| 5 | Trend (MA crossover) | Daily | Equal weight in every stock whose 20-day MA is above its 100-day MA; the rest in cash. If the set of qualifying stocks is the same as the stocks it holds, it holds (no small daily rebalances) |
 | 6 | Long–short momentum | First trading day of each week | Long the top 3, short the bottom 3 by 63-day return, 1/6 each (net 0, gross 100%) |
 | 7 | Constrained AI (Claude) | Daily | May only hold stocks from the current momentum top 5; chooses which, how much (0–20% each) and when, including holding all cash. Long only |
 | 8 | Autonomous Claude | Daily | Free choice within Medium limits |
@@ -111,6 +111,8 @@ All agents output **target weights** (fraction of current portfolio value per sy
 | 15 | AI Aggressive (Claude) | Daily | Autonomous within High limits; told to seek the highest return it can within them |
 
 On the first day of the run every agent makes its first decision, including weekly and monthly ones.
+
+Agents 3–6 trade only the 22 stocks, never SPY. Ranking ties are broken by symbol name (A before Z), so results are deterministic. A stock whose snapshot field for a rule is missing (too little history) is left out of that rule; agent 4 keeps an open position whose z-score is missing. Agents 2–6 also decide on any day when they hold none of the stocks yet, so a missed first decision is caught the next day.
 
 Agents 8–12 share one prompt template, word for word. Agents 7, 13, 14 and 15 have their own prompts, built from the same template (written together on Sat 5 Dec, stored in `agents/prompts/`).
 
@@ -234,3 +236,4 @@ Reported separately. Never ranked or tested against the equity agents.
 - **v1.1** · Sat 14 Nov 2026 · Crypto daily timings fixed (fetch 00:05Z, snapshot 00:10Z, decide 00:15Z), added to §13.
 - **v1.1 (clerical)** · Sat 14 Nov 2026 · Removed a repeated sentence; trading-day count corrected to 57 from the cached calendar; §1 names all three market holidays in the run (MLK Day 18 Jan, Presidents' Day 15 Feb, Good Friday 26 Mar 2027). No rule changed.
 - **v1.2** · Sat 14 Nov 2026 · §5: on the first day of the run every agent makes its first decision, including weekly and monthly ones (agent 2's first month, Jan 2027, starts during the shakedown). Day 1 is the decision on Mon 11 Jan after the close, filled at the Tue 12 Jan open (§3).
+- **v1.3** · Sat 14 Nov 2026 · §5 clarifications, written down before agents 3–6 were coded; no number changed. Agent 4: open positions that aren't exiting keep their 10% target, and it holds when nothing enters or exits. Agent 5: it holds when the set of qualifying stocks hasn't changed. Agents 3–6: only the 22 stocks, ties broken by symbol name, stocks with a missing field are left out, and a not-yet-invested portfolio is caught the next day.
