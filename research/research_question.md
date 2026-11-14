@@ -2,13 +2,22 @@
 
 **Status:** v0.1 draft, Sat 14 Nov 2026. Frozen at Gate 1 together with the protocol.
 
-## Primary question
+## The question
 
-> **When large language model agents and rule-based strategies trade the same US stocks with identical information and identical execution, how do they differ in risk-adjusted performance and risk-taking, and do the AI agents' written explanations match what they actually do?**
+**Short version (the headline):**
 
-The question deliberately asks *how they differ*, not *which wins*. With about 60 trading days, a difference in returns between two agents will usually be within the noise. Behaviour (how much an agent trades, how concentrated it is, whether it obeys its risk instructions, whether its reasons fit the data) can be measured precisely in 60 days, so that is where the paper's strongest claims will come from.
+> **Can AI trading agents beat simple rules, and do they do what they say?**
+
+**Full version (for the paper):**
+
+> **Over 12 weeks of live paper trading, with identical information and identical costs, how do AI trading agents from four model providers perform against rule-based strategies on return, risk-adjusted return and drawdown; how differently do they take risk; and do their written explanations match the trades they actually make?**
+
+Performance is a central result, not a side issue. Every agent's return, Sharpe ratio, drawdown and ranking will be reported in full. What 12 weeks can't do is make those rankings *certain*. Each Sharpe ratio comes with a confidence interval, and the paper says plainly which gaps are large enough to trust and which could be luck. Behaviour (how much an agent trades, how concentrated it is, whether it follows its risk instructions, whether its reasons fit the data) can be measured precisely in 12 weeks, so it backs up the performance results.
 
 ## Sub-questions
+
+### RQ0 · Performance
+How does each agent perform on total return, Sharpe and Sortino ratios, maximum drawdown, and alpha and beta against SPY? How do the agents rank, and which differences between them are large enough to survive a confidence interval?
 
 ### RQ1 · Strategies
 Do AI agents that are **constrained** (agent 7), **autonomous** (agents 8–11) or **adaptive** (agent 12) differ from fixed rules (agents 1–6) in Sharpe ratio, maximum drawdown, turnover and concentration?
@@ -34,7 +43,7 @@ Written now so the results can't reshape them. Each one can be wrong.
 
 ## What this study can and can't show
 
-- **Can:** describe and compare behaviour precisely; give effect sizes with bootstrap confidence intervals; measure explanation accuracy; show whether risk instructions are followed.
+- **Can:** report every agent's performance and ranking over the run, with honest uncertainty; describe and compare behaviour precisely; give effect sizes with bootstrap confidence intervals; measure explanation accuracy; show whether risk instructions are followed.
 - **Can't:** prove long-run outperformance (12 weeks, one market period); generalise beyond US large caps; separate a model's "skill" from the exact model version, which providers keep updating. That's why versions are recorded and frozen.
 
 ## Why it matters
