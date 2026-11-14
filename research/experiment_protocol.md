@@ -1,9 +1,9 @@
 # Experiment protocol
 
-**Version:** v0.2, Sat 14 Nov 2026 (Gate 1 numbers approved; decisions D6–D9 applied)
-**Next:** universe list and model versions filled in, then tagged `protocol-v1.0`. Final freeze as `protocol-v2.0` on Sun 10 Jan 2027, after the shakedown.
+**Version:** v1.0, Sat 14 Nov 2026 (Gate 1)
+**Next:** final freeze as `protocol-v2.0` on Sun 10 Jan 2027, after the shakedown. Final freeze as `protocol-v2.0` on Sun 10 Jan 2027, after the shakedown.
 
-All numbers were approved at the Gate 1 review on Sat 14 Nov 2026. Items still marked **[G1]** are filled in when the Gate 1 scripts have run. Everything follows from decisions D1–D9 in `research/decisions.md`.
+All numbers were approved at the Gate 1 review on Sat 14 Nov 2026. The universe and model lineup were filled in from the Gate 1 scripts the same evening. Everything follows from decisions D1–D9 in `research/decisions.md`.
 
 ---
 
@@ -28,7 +28,24 @@ Fifteen equity agents (6 rule-based, 9 AI) each start with the same virtual capi
 - A company with two share classes (e.g. GOOGL and GOOG) counts once: keep the class with the higher weight and take the next company.
 - A company already chosen from another ETF is skipped; take the next one.
 - Result: 22 stocks + SPY. Saved as `research/universe/universe.csv`, with the raw holdings files kept alongside as evidence.
-- **Freeze date:** the day `scripts/build_universe.py` is run at Gate 1 **[G1]**; the list is copied into this section.
+- **Freeze date:** Sat 14 Nov 2026 (State Street holdings files of that date, saved in `research/universe/holdings_2026-11-14/`).
+
+**Frozen universe** (all 23 tradable, shortable, easy to borrow and fractionable on Alpaca on the freeze date):
+
+| ETF | Stocks |
+|---|---|
+| XLB Materials | LIN, NEM |
+| XLC Communication | META, GOOGL |
+| XLE Energy | XOM, CVX |
+| XLF Financials | BRK.B, JPM |
+| XLI Industrials | GE, CAT |
+| XLK Technology | AAPL, NVDA |
+| XLP Consumer Staples | WMT, COST |
+| XLRE Real Estate | WELL, PLD |
+| XLU Utilities | NEE, SO |
+| XLV Health Care | LLY, JNJ |
+| XLY Consumer Discretionary | AMZN, TSLA |
+| Benchmark | SPY |
 
 **During the run** the list never changes. If a stock is acquired or delisted, its position is closed at its last traded price and the cash stays in cash. It is not replaced.
 
@@ -133,7 +150,9 @@ AI agents are not told what other agents exist or how they are doing.
 | Setting | Value |
 |---|---|
 | Access | All models through OpenRouter (D8), each **pinned to its official provider with fallbacks off**: Anthropic, OpenAI, Google, DeepSeek, xAI |
-| Models | Claude, GPT, Gemini, DeepSeek, Grok (D9). Exact OpenRouter model IDs: **[G1]**, copied here from `scripts/list_models.py` |
+| Models | Claude, GPT, Gemini, DeepSeek, Grok (D9), chosen at **one price tier** (about $2 per million input tokens) rather than each maker's most expensive model, so cost doesn't decide the comparison |
+| Model IDs | `anthropic/claude-sonnet-5.5` (Anthropic) · `openai/gpt-6.1-sol` (OpenAI) · `google/gemini-4-carbon` (Google) · `deepseek/deepseek-v4-pro-0813` (DeepSeek) · `x-ai/grok-4.7` (xAI). Checked by `scripts/test_pinned.py` |
+| Reasoning | Each model's default reasoning setting; where a level must be chosen, **medium**. No "pro"/extended modes. The setting used is logged with every call |
 | Agents 7, 13, 14, 15 and C1 | Same Claude model version as agent 8 |
 | Temperature | 0 where the model allows it; otherwise the provider default, recorded |
 | Tools | None: no web, no code execution |
@@ -183,12 +202,9 @@ Computed after the run from the log, for every agent:
 
 Artem starts and stops the official run himself, never Claude Code.
 
-## 12 · Remaining Gate 1 items
+## 12 · Gate 1 record
 
-1. Run `scripts/build_universe.py`; copy the list into §2 and commit the evidence files.
-2. Run `scripts/list_models.py`; choose one model per maker and copy the exact IDs into §8.
-3. Run `scripts/test_openrouter.py`; all five makers must return OK.
-4. Then tag `protocol-v1.0`.
+Gate 1 was held on Sat 14 Nov 2026. All numbers approved; universe built by rule (§2); model lineup fixed (§8) and checked with every model served by its own maker. Tagged `protocol-v1.0`.
 
 ## 13 · Crypto side experiment (D7)
 
@@ -210,3 +226,4 @@ Reported separately. Never ranked or tested against the equity agents.
 
 - **v0.1** · Sat 14 Nov 2026 · First draft from decisions D1–D5.
 - **v0.2** · Sat 14 Nov 2026 · Gate 1 numbers approved. Applied D6 (daily only), D7 (crypto side experiment, new §13), D8 (OpenRouter, provider pinning), D9 (five models; Grok added as agent 12, DeepSeek replaces Kimi as 11; agents 12–14 renumbered 13–15). Margin interest set to Alpaca's 6.5%. Agent 7 may hold all cash; AI agents aren't told about other agents.
+- **v1.0** · Sat 14 Nov 2026 · Gate 1. Universe frozen (22 stocks + SPY). Model lineup: Claude Sonnet 5.5, GPT-6.1 Sol, Gemini 4 Carbon, DeepSeek V4 Pro, Grok 4.7, matched on price tier; reasoning at default/medium.
