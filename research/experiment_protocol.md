@@ -1,6 +1,6 @@
 # Experiment protocol
 
-**Version:** v1.3, Sat 14 Nov 2026 (Gate 1 + crypto timings + day-1 decisions + agent 4/5 clarifications)
+**Version:** v1.4, Sat 14 Nov 2026 (Gate 1 + crypto timings + day-1 decisions + agent 4/5 clarifications + agent 4 capacity, pro rata clipping)
 **Next:** final freeze as `protocol-v2.0` on Sun 10 Jan 2027, after the shakedown.
 
 All numbers were approved at the Gate 1 review on Sat 14 Nov 2026. The universe and model lineup were filled in from the Gate 1 scripts the same evening. Everything follows from decisions D1–D9 in `research/decisions.md`.
@@ -97,7 +97,7 @@ All agents output **target weights** (fraction of current portfolio value per sy
 | 1 | Benchmark (SPY) | Day 1 only | 100% SPY, held for the whole run |
 | 2 | Equal-weight hold | First trading day of each month | 1/22 in each stock |
 | 3 | Momentum | First trading day of each week | Top 5 stocks by 63-day return, 20% each |
-| 4 | Mean reversion | Daily | Long when z ≤ −1.5, short when z ≥ +1.5, exit a long when z ≥ 0, a short when z ≤ 0; 10% per position. Open positions that aren't exiting keep their 10% target. If nothing enters or exits, it holds |
+| 4 | Mean reversion | Daily | Long when z ≤ −1.5, short when z ≥ +1.5, exit a long when z ≥ 0, a short when z ≤ 0. An entry gets 10% of current portfolio value. At most 10 open positions, of which at most 3 short; exits free their slots first, then entries fill free slots by the largest \|z\| first (ties by symbol), and the rest are skipped. No resizing: open positions keep the weight they have drifted to until they exit. Orders only for entries and exits; if there are none, it holds |
 | 5 | Trend (MA crossover) | Daily | Equal weight in every stock whose 20-day MA is above its 100-day MA; the rest in cash. If the set of qualifying stocks is the same as the stocks it holds, it holds (no small daily rebalances) |
 | 6 | Long–short momentum | First trading day of each week | Long the top 3, short the bottom 3 by 63-day return, 1/6 each (net 0, gross 100%) |
 | 7 | Constrained AI (Claude) | Daily | May only hold stocks from the current momentum top 5; chooses which, how much (0–20% each) and when, including holding all cash. Long only |
@@ -118,7 +118,7 @@ Agents 8–12 share one prompt template, word for word. Agents 7, 13, 14 and 15 
 
 ## 6 · Risk limits
 
-Checked after every decision, before any order. An order that would break a limit is **clipped** to the limit, and the clip is logged. Risk checks never add trades an agent didn't ask for, except forced reductions on a margin breach.
+Checked after every decision, before any order. An order that would break a limit is **clipped** to the limit, and the clip is logged. When a limit is breached, the positions on the breached side are scaled down **pro rata** until it holds: a per-stock limit cuts that position; the total-short limit scales all shorts; the gross limit scales all positions. Every clip is logged. Risk checks never add trades an agent didn't ask for, except forced reductions on a margin breach.
 
 | Profile | Agents | Max per stock | Shorts | Max gross exposure | Max total short |
 |---|---|---|---|---|---|
@@ -237,3 +237,4 @@ Reported separately. Never ranked or tested against the equity agents.
 - **v1.1 (clerical)** · Sat 14 Nov 2026 · Removed a repeated sentence; trading-day count corrected to 57 from the cached calendar; §1 names all three market holidays in the run (MLK Day 18 Jan, Presidents' Day 15 Feb, Good Friday 26 Mar 2027). No rule changed.
 - **v1.2** · Sat 14 Nov 2026 · §5: on the first day of the run every agent makes its first decision, including weekly and monthly ones (agent 2's first month, Jan 2027, starts during the shakedown). Day 1 is the decision on Mon 11 Jan after the close, filled at the Tue 12 Jan open (§3).
 - **v1.3** · Sat 14 Nov 2026 · §5 clarifications, written down before agents 3–6 were coded; no number changed. Agent 4: open positions that aren't exiting keep their 10% target, and it holds when nothing enters or exits. Agent 5: it holds when the set of qualifying stocks hasn't changed. Agents 3–6: only the 22 stocks, ties broken by symbol name, stocks with a missing field are left out, and a not-yet-invested portfolio is caught the next day.
+- **v1.4** · Sat 14 Nov 2026 · §5 agent 4: capacity of 10 open positions (10 × 10% = 100% gross), at most 3 shorts (30%); when entry signals exceed free slots, the largest |z_20| enters first, ties by symbol, the rest are skipped; an entry gets 10% of current portfolio value; no resizing, so open positions keep their drifted weight until they exit (replaces the v1.3 "keep their 10% target"). §6: a breached limit is fixed by scaling the breached side down pro rata, every clip logged. Decided after the 57-session trade count showed agent 4 at up to 20 positions, 200% gross, with 719 of 842 orders being resizes.
