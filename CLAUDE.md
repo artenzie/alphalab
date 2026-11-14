@@ -2,7 +2,7 @@
 
 AlphaLab is a research project that runs AI trading agents against Alpaca **paper** trading and measures how they perform.
 
-- Official start date: **TBD** (set this before the experiment begins; rule 3 applies from that date on)
+- Official start date: **Mon 11 Jan 2027** (D3; rule 3 applies from that date on)
 - Secrets live in `.env` (gitignored). Code reads them with `python-dotenv` + `os.getenv()` (see `test_alpaca.py`).
 - Python env: `venv/` (gitignored).
 
