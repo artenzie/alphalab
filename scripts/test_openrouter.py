@@ -1,4 +1,4 @@
-"""Smoke test: one tiny request to each model maker through OpenRouter.
+"""Smoke test: one tiny request to each of the five model makers (D9) through OpenRouter.
 
 Prints the model used and OK / the error. Never prints the API key.
 Run from the repo root:  python3 scripts/test_openrouter.py
@@ -16,7 +16,7 @@ if not KEY:
 
 BASE = "https://openrouter.ai/api/v1"
 HEADERS = {"Authorization": f"Bearer {KEY}"}
-MAKERS = {"Claude": "anthropic/", "GPT": "openai/", "Gemini": "google/", "Kimi": "moonshotai/"}
+MAKERS = {"Claude": "anthropic/", "GPT": "openai/", "Gemini": "google/", "DeepSeek": "deepseek/", "Grok": "x-ai/"}
 SKIP = (":free", "mini", "nano", "lite", "image", "audio", "embed", "search", "oss", "gemma")
 
 
@@ -55,4 +55,4 @@ credits = requests.get(f"{BASE}/credits", headers=HEADERS, timeout=30)
 if credits.ok:
     d = credits.json().get("data", {})
     print(f"\nBalance used so far: ${d.get('total_usage', 0):.4f} of ${d.get('total_credits', 0):.2f}")
-print("\nAll four working." if all_ok else "\nSomething failed: paste this output to Claude.")
+print("\nAll five working." if all_ok else "\nSomething failed: paste this output to Claude.")
