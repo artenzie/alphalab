@@ -91,6 +91,15 @@ def populated(conn):
                alpaca_equity, difference_usd) VALUES ('8', '2026-11-17', 2, 100044.975, 100050.0, 5.025)""",
     )
     conn.execute("INSERT INTO heartbeat (run_id, job, event) VALUES ('r1', 'decide', 'started')")
+    fetch = conn.execute(
+        """INSERT INTO calendar_fetches (range_start, range_end, n_sessions)
+           VALUES ('2026-11-16', '2026-11-16', 1)""",
+    ).lastrowid
+    conn.execute(
+        """INSERT INTO market_sessions (fetch_id, session_date, open_ts, close_ts)
+           VALUES (?, '2026-11-16', '2026-11-16T14:30:00.000Z', '2026-11-16T21:00:00.000Z')""",
+        (fetch,),
+    )
     conn.commit()
     return conn
 

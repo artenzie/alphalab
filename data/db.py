@@ -31,6 +31,8 @@ APPEND_ONLY_TABLES = (
     "equity",
     "mirror_recon",
     "heartbeat",
+    "calendar_fetches",
+    "market_sessions",
 )
 ALL_TABLES = ("agents",) + APPEND_ONLY_TABLES
 

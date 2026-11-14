@@ -285,6 +285,34 @@ CREATE TABLE IF NOT EXISTS heartbeat (
 CREATE INDEX IF NOT EXISTS ix_heartbeat_run ON heartbeat (run_id);
 
 -- ---------------------------------------------------------------------------
+-- market calendar: NYSE sessions from Alpaca, cached as versioned fetches
+-- ---------------------------------------------------------------------------
+-- Alpaca lists trading days only, so each fetch records the range it asked
+-- about. For a date D the answer comes from the newest fetch whose range
+-- contains D: a session row means open (with that close), no row means closed.
+-- A closure announced later simply appears as a newer fetch without that day.
+CREATE TABLE IF NOT EXISTS calendar_fetches (
+    fetch_id     INTEGER PRIMARY KEY,
+    range_start  TEXT NOT NULL CHECK (range_start GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]'),
+    range_end    TEXT NOT NULL CHECK (range_end GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]'),
+    fetched_at   TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+                 CHECK (fetched_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9]Z'),
+    n_sessions   INTEGER NOT NULL CHECK (n_sessions >= 0),
+    CHECK (range_end >= range_start)
+);
+CREATE INDEX IF NOT EXISTS ix_calendar_fetches_range ON calendar_fetches (range_start, range_end);
+
+CREATE TABLE IF NOT EXISTS market_sessions (
+    session_id    INTEGER PRIMARY KEY,
+    fetch_id      INTEGER NOT NULL REFERENCES calendar_fetches(fetch_id),
+    session_date  TEXT NOT NULL CHECK (session_date GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]'),
+    open_ts       TEXT NOT NULL CHECK (open_ts GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9]Z'),   -- UTC (Alpaca gives ET)
+    close_ts      TEXT NOT NULL CHECK (close_ts GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9]Z'),  -- UTC; early closes included
+    CHECK (close_ts > open_ts),
+    UNIQUE (fetch_id, session_date)
+);
+
+-- ---------------------------------------------------------------------------
 -- Integrity triggers
 -- ---------------------------------------------------------------------------
 
@@ -326,3 +354,7 @@ CREATE TRIGGER IF NOT EXISTS mirror_recon_no_update BEFORE UPDATE ON mirror_reco
 CREATE TRIGGER IF NOT EXISTS mirror_recon_no_delete BEFORE DELETE ON mirror_recon BEGIN SELECT RAISE(ABORT, 'mirror_recon is append-only (CLAUDE.md rule 2)'); END;
 CREATE TRIGGER IF NOT EXISTS heartbeat_no_update    BEFORE UPDATE ON heartbeat    BEGIN SELECT RAISE(ABORT, 'heartbeat is append-only (CLAUDE.md rule 2)'); END;
 CREATE TRIGGER IF NOT EXISTS heartbeat_no_delete    BEFORE DELETE ON heartbeat    BEGIN SELECT RAISE(ABORT, 'heartbeat is append-only (CLAUDE.md rule 2)'); END;
+CREATE TRIGGER IF NOT EXISTS calendar_fetches_no_update BEFORE UPDATE ON calendar_fetches BEGIN SELECT RAISE(ABORT, 'calendar_fetches is append-only (CLAUDE.md rule 2)'); END;
+CREATE TRIGGER IF NOT EXISTS calendar_fetches_no_delete BEFORE DELETE ON calendar_fetches BEGIN SELECT RAISE(ABORT, 'calendar_fetches is append-only (CLAUDE.md rule 2)'); END;
+CREATE TRIGGER IF NOT EXISTS market_sessions_no_update  BEFORE UPDATE ON market_sessions  BEGIN SELECT RAISE(ABORT, 'market_sessions is append-only (CLAUDE.md rule 2)'); END;
+CREATE TRIGGER IF NOT EXISTS market_sessions_no_delete  BEFORE DELETE ON market_sessions  BEGIN SELECT RAISE(ABORT, 'market_sessions is append-only (CLAUDE.md rule 2)'); END;
