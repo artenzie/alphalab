@@ -27,6 +27,10 @@ never filled.
 
 Every run writes heartbeat rows (job 'fetch_prices'): started, then finished
 (with counts) or error. API keys are read from .env and never printed.
+
+After a successful fetch, the data checks (data/checks.py) run on the same
+window and write their own heartbeat rows (job 'data_checks', same run_id).
+The exit code is 1 if they find an error; warnings alone leave it at 0.
 """
 
 from __future__ import annotations
@@ -483,10 +487,12 @@ def run(conn: sqlite3.Connection, clients: Clients, days: int = 5,
         equity_symbols: list[str] | None = None,
         crypto_symbols=CRYPTO_SYMBOLS,
         start_date: date | None = None,
-        chunk_pause: float = CHUNK_PAUSE) -> int:
+        chunk_pause: float = CHUNK_PAUSE,
+        data_checks: bool = True) -> int:
     """One ingestion run. Returns a process exit code (0 ok, 1 error).
 
     With `start_date`, backfill from that date (00:00 UTC) instead of `days`.
+    With `data_checks`, the checks run afterwards and an error in them gives 1.
     """
     run_id = uuid.uuid4().hex
     equity_symbols = equity_symbols if equity_symbols is not None else load_universe()
@@ -538,7 +544,18 @@ def run(conn: sqlite3.Connection, clients: Clients, days: int = 5,
           f"unchanged {t['unchanged']}, rejected (unclosed) {t['rejected_unclosed']}"
           + (f"; no bars for {missing}" if missing else ""))
     print(format_report(report, start.date()))
-    return 0
+    if not data_checks:
+        return 0
+    from data import checks  # imports this module, so not at the top
+    try:
+        code, problems, splits = checks.check_and_alert(conn, run_id, equity_symbols, crypto_symbols,
+                                                        start.date(), now(), clients.trading)
+    except Exception as exc:  # noqa: BLE001 - a crash in the checks is an error too
+        checks._heartbeat(conn, run_id, "error", {"status": "error", "error": describe(exc)})
+        print(f"ERROR: data checks failed: {describe(exc)}", file=sys.stderr)
+        return 1
+    print("Data checks:\n" + checks.format_report(problems, splits))
+    return code
 
 
 def main(argv: list[str] | None = None) -> int:

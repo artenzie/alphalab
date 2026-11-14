@@ -121,7 +121,7 @@ def conn(tmp_path):
 
 def do_run(conn, cl, now=AFTER_ALL, sleeps=None):
     sleeps = [] if sleeps is None else sleeps
-    return ingest.run(conn, cl, days=5, now=lambda: now, sleep=sleeps.append,
+    return ingest.run(conn, cl, data_checks=False, days=5, now=lambda: now, sleep=sleeps.append,
                       equity_symbols=["AAPL"], crypto_symbols=("BTC/USD",))
 
 
@@ -164,7 +164,7 @@ def test_raw_and_split_merge_into_one_row(conn):
 def test_rerun_with_same_data_inserts_nothing(conn):
     clock = Clock(AFTER_ALL)
     for _ in range(3):
-        assert ingest.run(conn, clients(), days=5, now=clock, sleep=lambda s: None,
+        assert ingest.run(conn, clients(), data_checks=False, days=5, now=clock, sleep=lambda s: None,
                           equity_symbols=["AAPL"], crypto_symbols=("BTC/USD",)) == 0
     assert len(prices(conn)) == 2
     finished = [d for e, d in events(conn) if e == "finished"]
@@ -176,10 +176,10 @@ def test_changed_values_create_new_version(conn):
     clock = Clock(AFTER_ALL)
     kw = dict(days=5, now=clock, sleep=lambda s: None, equity_symbols=["AAPL"], crypto_symbols=("BTC/USD",))
     raw = {"AAPL": [bar(EQ_TS, close=400.0)]}
-    ingest.run(conn, clients(raw, raw), **kw)
+    ingest.run(conn, clients(raw, raw), data_checks=False, **kw)
     first_fetch = prices(conn)[0]["fetched_at"]
     # A 4:1 split is applied later: raw unchanged, adjusted values change.
-    ingest.run(conn, clients(raw, {"AAPL": [bar(EQ_TS, close=100.0)]}), **kw)
+    ingest.run(conn, clients(raw, {"AAPL": [bar(EQ_TS, close=100.0)]}), data_checks=False, **kw)
     aapl = [r for r in prices(conn) if r["symbol"] == "AAPL"]
     assert [r["adj_close"] for r in aapl] == [400.0, 100.0]
     # Point-in-time: a cutoff before the second fetch still sees the old version.
@@ -356,7 +356,7 @@ BF_CR = [utc_dt(2024, 11, 1), utc_dt(2024, 12, 31), utc_dt(2025, 1, 1), utc_dt(2
 
 def backfill(conn, cl, now=AFTER_ALL, sleeps=None):
     sleeps = [] if sleeps is None else sleeps
-    return ingest.run(conn, cl, now=now if callable(now) else (lambda: now), sleep=sleeps.append,
+    return ingest.run(conn, cl, data_checks=False, now=now if callable(now) else (lambda: now), sleep=sleeps.append,
                       equity_symbols=["AAPL"], crypto_symbols=("BTC/USD",),
                       start_date=date(2024, 11, 1))
 
@@ -402,7 +402,7 @@ def test_backfill_failure_in_later_chunk_keeps_earlier_chunks(conn):
 
 
 def test_start_after_now_is_an_error(conn):
-    rc = ingest.run(conn, clients(), now=lambda: AFTER_ALL, sleep=lambda s: None,
+    rc = ingest.run(conn, clients(), data_checks=False, now=lambda: AFTER_ALL, sleep=lambda s: None,
                     equity_symbols=["AAPL"], crypto_symbols=("BTC/USD",), start_date=date(2026, 11, 15))
     assert rc == 1 and "not before now" in events(conn)[-1][1]["error"]
 
@@ -465,7 +465,7 @@ def test_run_reports_gaps_not_weekends_or_holidays(conn):
     cr_days = [d("2026-11-02") + timedelta(days=i) for i in range(12)]
     cr = [bar(datetime(x.year, x.month, x.day, tzinfo=UTC)) for x in cr_days if x != d("2026-11-08")]
     cl = clients(raw={"AAPL": eq}, crypto={"BTC/USD": cr}, sessions=sessions)
-    rc = ingest.run(conn, cl, now=lambda: AFTER_ALL, sleep=lambda s: None, equity_symbols=["AAPL"],
+    rc = ingest.run(conn, cl, data_checks=False, now=lambda: AFTER_ALL, sleep=lambda s: None, equity_symbols=["AAPL"],
                     crypto_symbols=("BTC/USD",), start_date=d("2026-11-02"))
     assert rc == 0
     cov = events(conn)[-1][1]["coverage"]
@@ -480,7 +480,7 @@ def test_run_reports_late_start(conn):
     sessions = weekdays(d("2026-11-02"), d("2026-11-13"))
     eq = [bar(datetime(x.year, x.month, x.day, 5, tzinfo=UTC)) for x in sessions if x >= d("2026-11-09")]
     cl = clients(raw={"AAPL": eq}, crypto={}, sessions=sessions)
-    ingest.run(conn, cl, now=lambda: AFTER_ALL, sleep=lambda s: None, equity_symbols=["AAPL"],
+    ingest.run(conn, cl, data_checks=False, now=lambda: AFTER_ALL, sleep=lambda s: None, equity_symbols=["AAPL"],
                crypto_symbols=(), start_date=d("2026-11-02"))
     cov = events(conn)[-1][1]["coverage"]["AAPL"]
     assert cov["late_start"] and cov["first"] == "2026-11-09" and cov["gap_ranges"] == []
@@ -507,3 +507,48 @@ def test_cli_rejects_bad_start_date(capsys):
         ingest.main(["--start", "2024-13-01"])
     with pytest.raises(SystemExit):
         ingest.main(["--start", "2999-01-01"])
+
+
+# --- data checks after ingest ----------------------------------------------
+
+def hook_clients(eq_closes=None, skip_eq=()):
+    """Mon 9 .. Fri 13 Nov 2026: AAPL every session, BTC every day (the 5-day window to AFTER_ALL)."""
+    ds = [date(2026, 11, 9) + timedelta(days=i) for i in range(5)]
+    eq_closes = eq_closes or [100.0, 101.0, 100.5, 102.0, 101.5]
+    eq = [bar(datetime(x.year, x.month, x.day, 5, tzinfo=UTC), close=c)
+          for x, c in zip(ds, eq_closes) if x not in skip_eq]
+    cr = [bar(datetime(x.year, x.month, x.day, tzinfo=UTC), close=70000.0 + i) for i, x in enumerate(ds)]
+    return clients(raw={"AAPL": eq}, crypto={"BTC/USD": cr})
+
+
+def hook_run(conn, cl):
+    return ingest.run(conn, cl, days=5, now=lambda: AFTER_ALL, sleep=lambda s: None,
+                      equity_symbols=["AAPL"], crypto_symbols=("BTC/USD",))
+
+
+def check_events(conn):
+    return [(r["run_id"], r["event"], json.loads(r["detail"])) for r in
+            conn.execute("SELECT * FROM heartbeat WHERE job = 'data_checks' ORDER BY heartbeat_id")]
+
+
+def test_checks_run_after_ingest_with_same_run_id(conn):
+    assert hook_run(conn, hook_clients()) == 0
+    ingest_run = conn.execute("SELECT run_id FROM heartbeat WHERE job = 'fetch_prices'").fetchone()[0]
+    (r1, e1, _), (r2, e2, d) = check_events(conn)
+    assert r1 == r2 == ingest_run and (e1, e2, d["status"]) == ("started", "finished", "ok")
+
+
+def test_check_error_after_ingest_exits_1(conn):
+    assert hook_run(conn, hook_clients(skip_eq={date(2026, 11, 11)})) == 1
+    _, event, d = check_events(conn)[-1]
+    assert event == "error" and [p["check"] for p in d["problems"]] == ["missing_day"]
+    # the fetch itself still finished
+    assert [r[0] for r in conn.execute("SELECT event FROM heartbeat WHERE job = 'fetch_prices'")] == \
+        ["started", "finished"]
+
+
+def test_check_warning_after_ingest_exits_0(conn):
+    assert hook_run(conn, hook_clients(eq_closes=[100.0, 101.0, 131.0, 132.0, 131.5])) == 0  # +30%
+    _, event, d = check_events(conn)[-1]
+    assert event == "finished" and d["status"] == "warning"
+    assert [p["check"] for p in d["problems"]] == ["suspicious_move"]
