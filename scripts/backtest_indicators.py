@@ -66,7 +66,7 @@ def run(db_path: Path, n_sessions: int = 57) -> dict:
         agent = registry.get_agent(agent_id)
         cash, shares = START_VALUE, {}
         r = {"name": registry.NAMES[agent_id], "decisions": 0, "orders": 0, "opens_closes": 0, "resizes": 0,
-             "targets": [], "positions": [], "max_gross": 0.0, "max_shorts": 0}
+             "targets": [], "current": [], "positions": [], "max_gross": 0.0, "max_shorts": 0}
         for snap, c in zip(snaps, contexts):
             px = {s: f["last_close"] for s, f in snap.payload["symbols"].items()}
             value = cash + sum(q * px[s] for s, q in shares.items())
@@ -74,6 +74,7 @@ def run(db_path: Path, n_sessions: int = 57) -> dict:
             if not dec.is_hold:
                 r["decisions"] += 1
                 r["targets"].append(dict(dec.weights))
+                r["current"].append({s: q * px[s] / value for s, q in shares.items()})
                 r["max_gross"] = max(r["max_gross"], sum(abs(w) for w in dec.weights.values()))
                 new = {s: w * value / px[s] for s, w in dec.weights.items() if w != 0}
                 for s in set(shares) | set(new):
