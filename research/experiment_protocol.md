@@ -1,6 +1,6 @@
 # Experiment protocol
 
-**Version:** v1.1, Sat 14 Nov 2026 (Gate 1 + crypto timings)
+**Version:** v1.2, Sat 14 Nov 2026 (Gate 1 + crypto timings + day-1 decisions)
 **Next:** final freeze as `protocol-v2.0` on Sun 10 Jan 2027, after the shakedown.
 
 All numbers were approved at the Gate 1 review on Sat 14 Nov 2026. The universe and model lineup were filled in from the Gate 1 scripts the same evening. Everything follows from decisions D1–D9 in `research/decisions.md`.
@@ -109,6 +109,8 @@ All agents output **target weights** (fraction of current portfolio value per sy
 | 13 | Adaptive blender (Claude) | First trading day of each week | Allocates 0–70% to each of agents 3–6 (summing to 100%) and explains why; its portfolio is that blend of their target portfolios |
 | 14 | AI Cautious (Claude) | Daily | Autonomous within Low limits; told to keep portfolio volatility below SPY's |
 | 15 | AI Aggressive (Claude) | Daily | Autonomous within High limits; told to seek the highest return it can within them |
+
+On the first day of the run every agent makes its first decision, including weekly and monthly ones.
 
 Agents 8–12 share one prompt template, word for word. Agents 7, 13, 14 and 15 have their own prompts, built from the same template (written together on Sat 5 Dec, stored in `agents/prompts/`).
 
@@ -231,3 +233,4 @@ Reported separately. Never ranked or tested against the equity agents.
 - **v1.0** · Sat 14 Nov 2026 · Gate 1. Universe frozen (22 stocks + SPY). Model lineup: Claude Sonnet 5.5, GPT-6.1 Sol, Gemini 4 Carbon, DeepSeek V4 Pro, Grok 4.7, matched on price tier; reasoning at default/medium.
 - **v1.1** · Sat 14 Nov 2026 · Crypto daily timings fixed (fetch 00:05Z, snapshot 00:10Z, decide 00:15Z), added to §13.
 - **v1.1 (clerical)** · Sat 14 Nov 2026 · Removed a repeated sentence; trading-day count corrected to 57 from the cached calendar; §1 names all three market holidays in the run (MLK Day 18 Jan, Presidents' Day 15 Feb, Good Friday 26 Mar 2027). No rule changed.
+- **v1.2** · Sat 14 Nov 2026 · §5: on the first day of the run every agent makes its first decision, including weekly and monthly ones (agent 2's first month, Jan 2027, starts during the shakedown). Day 1 is the decision on Mon 11 Jan after the close, filled at the Tue 12 Jan open (§3).
