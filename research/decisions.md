@@ -4,19 +4,19 @@ Design decisions for AlphaLab, newest at the bottom. Each one says what was deci
 
 ---
 
-## D1 · How 14 agents trade when Alpaca gives 3 paper accounts
+## D1 · How the agents trade when Alpaca gives 3 paper accounts
 
 **Decided:** Sat 14 Nov 2026 · **Status:** accepted
 
 **Context.** Each Alpaca login gets three paper accounts. Alpaca's paper trading also skips borrow fees, slippage and dividends, so its fills are kinder than real trading.
 
-**Decision.** All 14 agents trade through our own simulated ledger, priced from Alpaca market data. Three agents are also mirrored on real Alpaca paper accounts as a cross-check:
+**Decision.** All 15 equity agents (originally 14; see D9) trade through our own simulated ledger, priced from Alpaca market data. Three agents are also mirrored on real Alpaca paper accounts as a cross-check:
 
 | Alpaca paper account | Mirrors agent |
 |---|---|
 | 1 | Agent 1 · Benchmark (SPY) |
 | 2 | Agent 8 · Autonomous Claude |
-| 3 | Agent 12 · Adaptive blender |
+| 3 | Agent 13 · Adaptive blender (agent 12 before D9) |
 
 **Why.** One ledger means every agent gets an identical cost, slippage and borrow model, which makes the comparison fair. It is also more realistic than Alpaca's paper fills. The ledger's maths becomes part of the project rather than a black box.
 
@@ -89,7 +89,7 @@ The rule is fixed now, before the shakedown data exists, so the decision can't b
 
 **Decided:** Sat 14 Nov 2026 · **Status:** accepted; details fixed at Gate 1
 
-**Decision.** Run a small crypto side experiment alongside the main one, on the same engine and dashboard, but **reported separately**, never ranked against the 14 equity agents:
+**Decision.** Run a small crypto side experiment alongside the main one, on the same engine and dashboard, but **reported separately**, never ranked against the equity agents:
 
 | Agent | What it does |
 |---|---|
@@ -111,3 +111,24 @@ The rule is fixed now, before the shakedown data exists, so the decision can't b
 **Why.** One sign-up instead of four, one bill and one cap. The 5.5% credit fee is under a dollar a month at our spend. If OpenRouter is down, every AI agent holds that day, which affects all models equally.
 
 **Revisit if:** OpenRouter can't pin a model to its official provider, or its outages cost more than a few days during the shakedown.
+
+---
+
+## D9 · Model lineup
+
+**Decided:** Sat 14 Nov 2026 · **Status:** accepted; exact model versions frozen at Gate 1
+
+**Decision.** The autonomous model comparison uses **five** models: **Claude** (Anthropic), **GPT** (OpenAI), **Gemini** (Google), **DeepSeek** and **Grok** (xAI). Kimi (Moonshot) is dropped. This adds one agent, so the roster becomes **15 equity agents**, renumbered:
+
+| # | Agent |
+|---|---|
+| 1–6 | Rule-based (unchanged) |
+| 7 | Constrained AI (Claude) |
+| 8–12 | Autonomous Claude, GPT, Gemini, DeepSeek, Grok |
+| 13 | Adaptive blender (Claude) |
+| 14 | AI Cautious (Claude) |
+| 15 | AI Aggressive (Claude) |
+
+**Why.** The best-known live test of AI traders, nof1's Alpha Arena (Oct–Nov 2025), used Claude, GPT, Gemini, Grok, DeepSeek and Qwen on crypto. Matching its lineup lets the paper compare results directly, including whether DeepSeek's strong showing there holds up under controls, benchmarks, identical costs and a 12-week run. Five models is the limit: each extra agent adds cost and makes a lucky "winner" more likely.
+
+**Note:** the smoke test on Sat 14 Nov confirmed one OpenRouter key reaches Claude, GPT, Gemini and Kimi. DeepSeek and Grok are checked at Gate 1.
