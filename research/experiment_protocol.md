@@ -1,15 +1,15 @@
 # Experiment protocol
 
-**Version:** v0.1 draft, Sat 14 Nov 2026
-**Next:** reviewed line by line at Gate 1, then tagged `protocol-v1.0`. Final freeze as `protocol-v2.0` on Sun 10 Jan 2027, after the shakedown.
+**Version:** v0.2, Sat 14 Nov 2026 (Gate 1 numbers approved; decisions D6–D9 applied)
+**Next:** universe list and model versions filled in, then tagged `protocol-v1.0`. Final freeze as `protocol-v2.0` on Sun 10 Jan 2027, after the shakedown.
 
-Numbers marked **[G1]** are proposals to confirm or change at the Gate 1 review. Everything else follows from decisions D1–D5 in `research/decisions.md`.
+All numbers were approved at the Gate 1 review on Sat 14 Nov 2026. Items still marked **[G1]** are filled in when the Gate 1 scripts have run. Everything follows from decisions D1–D9 in `research/decisions.md`.
 
 ---
 
 ## 1 · Overview
 
-Fourteen agents (6 rule-based, 8 AI) each start with the same virtual capital. Every trading day after the US close, one snapshot of market data is built. Each agent sees the snapshot (and its own portfolio), outputs target portfolio weights, passes risk checks, and is filled at the next day's open in a simulated ledger. Every step is logged in an append-only database.
+Fifteen equity agents (6 rule-based, 9 AI) each start with the same virtual capital. Every trading day after the US close, one snapshot of market data is built. Each agent sees the snapshot (and its own portfolio), outputs target portfolio weights, passes risk checks, and is filled at the next day's open in a simulated ledger. Every step is logged in an append-only database.
 
 | Item | Value |
 |---|---|
@@ -17,8 +17,9 @@ Fourteen agents (6 rule-based, 8 AI) each start with the same virtual capital. E
 | Shakedown | Mon 14 Dec 2026 – Fri 8 Jan 2027, same configuration, data thrown away |
 | Market | US equities, NYSE calendar |
 | Starting capital | $100,000 per agent, USD |
-| Decisions | Once per trading day after the close (some agents act only weekly or monthly) |
+| Decisions | Once per trading day after the close (some agents act only weekly or monthly). No intraday trading (D6) |
 | Fills | Next trading day's opening price, in our own ledger (D1) |
+| Side experiment | Two crypto agents, reported separately (§13, D7) |
 
 ## 2 · Universe (D4)
 
@@ -27,7 +28,7 @@ Fourteen agents (6 rule-based, 8 AI) each start with the same virtual capital. E
 - A company with two share classes (e.g. GOOGL and GOOG) counts once: keep the class with the higher weight and take the next company.
 - A company already chosen from another ETF is skipped; take the next one.
 - Result: 22 stocks + SPY. Saved as `research/universe/universe.csv`, with the raw holdings files kept alongside as evidence.
-- **Freeze date:** the Gate 1 review day **[G1]**.
+- **Freeze date:** the day `scripts/build_universe.py` is run at Gate 1 **[G1]**; the list is copied into this section.
 
 **During the run** the list never changes. If a stock is acquired or delisted, its position is closed at its last traded price and the cash stays in cash. It is not replaced.
 
@@ -78,20 +79,21 @@ All agents output **target weights** (fraction of current portfolio value per sy
 |---|---|---|---|
 | 1 | Benchmark (SPY) | Day 1 only | 100% SPY, held for the whole run |
 | 2 | Equal-weight hold | First trading day of each month | 1/22 in each stock |
-| 3 | Momentum | First trading day of each week | Top 5 stocks by 63-day return, 20% each **[G1]** |
-| 4 | Mean reversion | Daily | Long when z ≤ −1.5, short when z ≥ +1.5, exit when z crosses 0; 10% per position **[G1]** |
+| 3 | Momentum | First trading day of each week | Top 5 stocks by 63-day return, 20% each |
+| 4 | Mean reversion | Daily | Long when z ≤ −1.5, short when z ≥ +1.5, exit when z crosses 0; 10% per position |
 | 5 | Trend (MA crossover) | Daily | Equal weight in every stock whose 20-day MA is above its 100-day MA; the rest in cash |
 | 6 | Long–short momentum | First trading day of each week | Long the top 3, short the bottom 3 by 63-day return, 1/6 each (net 0, gross 100%) |
-| 7 | Constrained AI (Claude) | Daily | May only hold stocks from the current momentum top 5; chooses which, how much (0–20% each) and when. Long only |
+| 7 | Constrained AI (Claude) | Daily | May only hold stocks from the current momentum top 5; chooses which, how much (0–20% each) and when, including holding all cash. Long only |
 | 8 | Autonomous Claude | Daily | Free choice within Medium limits |
 | 9 | Autonomous GPT | Daily | Identical prompt and snapshot to 8 |
 | 10 | Autonomous Gemini | Daily | Identical prompt and snapshot to 8 |
-| 11 | Autonomous Kimi | Daily | Identical prompt and snapshot to 8 |
-| 12 | Adaptive blender (Claude) | First trading day of each week | Allocates 0–70% to each of agents 3–6 (summing to 100%) and explains why; its portfolio is that blend of their target portfolios |
-| 13 | AI Cautious (Claude) | Daily | Autonomous within Low limits; told to keep portfolio volatility below SPY's |
-| 14 | AI Aggressive (Claude) | Daily | Autonomous within High limits; told to seek the highest return it can within them |
+| 11 | Autonomous DeepSeek | Daily | Identical prompt and snapshot to 8 |
+| 12 | Autonomous Grok | Daily | Identical prompt and snapshot to 8 |
+| 13 | Adaptive blender (Claude) | First trading day of each week | Allocates 0–70% to each of agents 3–6 (summing to 100%) and explains why; its portfolio is that blend of their target portfolios |
+| 14 | AI Cautious (Claude) | Daily | Autonomous within Low limits; told to keep portfolio volatility below SPY's |
+| 15 | AI Aggressive (Claude) | Daily | Autonomous within High limits; told to seek the highest return it can within them |
 
-Agents 8–11 share one prompt template, word for word. Agents 7, 12, 13 and 14 have their own prompts, built from the same template (written together on Sat 5 Dec, stored in `agents/prompts/`).
+Agents 8–12 share one prompt template, word for word. Agents 7, 13, 14 and 15 have their own prompts, built from the same template (written together on Sat 5 Dec, stored in `agents/prompts/`).
 
 ## 6 · Risk limits
 
@@ -100,14 +102,14 @@ Checked after every decision, before any order. An order that would break a limi
 | Profile | Agents | Max per stock | Shorts | Max gross exposure | Max total short |
 |---|---|---|---|---|---|
 | Market | 1, 2 | 100% SPY / 1/22 each | No | 100% | 0% |
-| Medium | 3–12 | 20% | Agents 4, 6, 8–11, and 12 through its blend of 4 and 6 | 100% | 30% (50% for agents 6 and 12) |
-| Low | 13 | 10% | No | 100% | 0% |
-| High | 14 | 30% | Yes | 150% | 50% |
+| Medium | 3–13 | 20% | Agents 4, 6, 8–12, and 13 through its blend of 4 and 6 | 100% | 30% (50% for agents 6 and 13) |
+| Low | 14 | 10% | No | 100% | 0% |
+| High | 15 | 30% | Yes | 150% | 50% |
 
-All limits **[G1]**.
+AI agents are not told what other agents exist or how they are doing.
 
 - **Shorts** are only allowed in stocks Alpaca flags easy-to-borrow at decision time. Otherwise the short is rejected and logged.
-- **Margin:** if an agent's equity falls below 30% of its gross exposure, positions are cut pro rata until it's back above 40% **[G1]**.
+- **Margin:** if an agent's equity falls below 30% of its gross exposure, positions are cut pro rata until it's back above 40%.
 - **No kill switch:** an agent that loses money keeps trading. Its losses are data.
 
 ## 7 · Execution and cost model (the ledger)
@@ -115,32 +117,33 @@ All limits **[G1]**.
 | Item | Model |
 |---|---|
 | Fill price | Next day's official open |
-| Slippage | 5 basis points (0.05%) against the agent on every fill **[G1]** |
+| Slippage | 5 basis points (0.05%) against the agent on every fill |
 | Commission | $0 (as Alpaca) |
 | Fractional shares | Allowed for longs; shorts in whole shares only (as Alpaca) |
-| Borrow fee | 0.50% per year on the value of each short, charged daily **[G1]** |
-| Margin interest | 6.0% per year on borrowed cash, charged daily **[G1]**; check Alpaca's current rate |
+| Borrow fee | 0.50% per year on the value of each short, charged daily. Alpaca charges $0 for easy-to-borrow stocks; we keep a small fee deliberately, to be conservative and closer to other brokers |
+| Margin interest | 6.5% per year on borrowed cash, charged daily on a 360-day year (Alpaca's published non-Elite rate, checked 14 Nov 2026) |
 | Interest on cash | None |
 | Dividends | Ignored for every agent alike (simplification, stated in the paper) |
 | Minimum trade | Trades under $100 are skipped, to avoid noise from tiny rebalances |
 
-**Alpaca mirrors (D1):** agents 1, 8 and 12 also send the same orders to three Alpaca paper accounts at the open. Ledger and mirror are reconciled daily; differences are logged, never "fixed" in the ledger.
+**Alpaca mirrors (D1):** agents 1, 8 and 13 also send the same orders to three Alpaca paper accounts at the open. Ledger and mirror are reconciled daily; differences are logged, never "fixed" in the ledger.
 
 ## 8 · AI settings
 
 | Setting | Value |
 |---|---|
-| Models | One per provider: Anthropic (Claude), OpenAI (GPT), Google (Gemini), Moonshot (Kimi). **Exact model version strings recorded and frozen at Gate 1** |
-| Agents 7, 12, 13, 14 | Same Claude model version as agent 8 |
+| Access | All models through OpenRouter (D8), each **pinned to its official provider with fallbacks off**: Anthropic, OpenAI, Google, DeepSeek, xAI |
+| Models | Claude, GPT, Gemini, DeepSeek, Grok (D9). Exact OpenRouter model IDs: **[G1]**, copied here from `scripts/list_models.py` |
+| Agents 7, 13, 14, 15 and C1 | Same Claude model version as agent 8 |
 | Temperature | 0 where the model allows it; otherwise the provider default, recorded |
 | Tools | None: no web, no code execution |
 | Calls | One call per agent per decision |
 | Output | JSON: target weight per symbol, one-line reason per position, overall reasoning, confidence 0–1 |
 | Invalid output | One retry with the validation error shown. Still invalid: hold current portfolio, log as `invalid` |
-| Provider down | Three retries with back-off over 30 minutes. Still down: hold, log as `unavailable`. Never substitute another model |
-| Spend caps | Monthly cap per provider **[G1]**, set after the Wed 9 Dec cost check. Cap reached: hold, log as `capped` |
+| Provider down | Three retries with back-off over 30 minutes. Still down: hold, log as `unavailable`. Never substitute another model or provider |
+| Spend cap | One OpenRouter workspace budget: $15 a month, reviewed at the Wed 9 Dec cost check. Cap reached: hold, log as `capped` |
 
-Every call is logged: prompt hash, full response, tokens in and out, cost and latency.
+Every call is logged: prompt hash, model ID, the provider that actually served it, full response, tokens in and out, cost and latency. A call served by any other provider is treated as invalid.
 
 ## 9 · Logging (append-only)
 
@@ -168,7 +171,7 @@ Computed after the run from the log, for every agent:
 - **Behaviour:** turnover, average gross and net exposure, concentration (Herfindahl index), share of days in cash, short usage, risk-check clips
 - **Explanations (RQ4):** tagging scheme built in Phase 6, before results are analysed
 
-**Inference.** Differences in Sharpe ratio against the Benchmark get 95% confidence intervals from a block bootstrap (10,000 resamples, block length 5 days) **[G1]**. With 13 comparisons, p-values are adjusted with the Holm method. Results are reported as effect sizes with intervals, whether or not they are "significant".
+**Inference.** Differences in Sharpe ratio against the Benchmark get 95% confidence intervals from a block bootstrap (10,000 resamples, block length 5 days). With 14 comparisons, p-values are adjusted with the Holm method. Results are reported as effect sizes with intervals, whether or not they are "significant".
 
 ## 11 · Change control
 
@@ -180,15 +183,30 @@ Computed after the run from the log, for every agent:
 
 Artem starts and stops the official run himself, never Claude Code.
 
-## 12 · Open items for the Gate 1 review
+## 12 · Remaining Gate 1 items
 
-1. Confirm every **[G1]** number above.
-2. Record the exact model version strings for all four providers.
-3. Run the universe rule and save the list and holdings files.
-4. Decide whether agent 7 may also exit to cash completely (current draft: yes, weights may sum to less than 100%).
-5. Decide whether the AI agents should be told what kind of agents they are competing with (current draft: no).
-6. Check the borrow-fee and margin-interest assumptions against Alpaca's current published rates.
+1. Run `scripts/build_universe.py`; copy the list into §2 and commit the evidence files.
+2. Run `scripts/list_models.py`; choose one model per maker and copy the exact IDs into §8.
+3. Run `scripts/test_openrouter.py`; all five makers must return OK.
+4. Then tag `protocol-v1.0`.
+
+## 13 · Crypto side experiment (D7)
+
+Reported separately. Never ranked or tested against the equity agents.
+
+| Item | Value |
+|---|---|
+| Agents | **C0** Bitcoin benchmark: 100% BTC on day 1, held. **C1** AI crypto trader (Claude, same model as agent 8) |
+| Coins | BTC, ETH, SOL, XRP, DOGE against USD (Alpha Arena's set minus BNB). Availability on Alpaca confirmed in Phase 1 |
+| Capital | $100,000 each |
+| Decisions | Once a day after the 00:00 UTC daily bar closes; filled at the next available price |
+| C1 limits | Long only (Alpaca crypto can't be shorted or bought on margin); max 50% in one coin; may hold cash |
+| C1 instruction | Aim for the highest return it can within the limits |
+| C1 sees | The same kind of snapshot as the equity agents (returns, moving averages, volatility, z-scores) for the 5 coins, plus its own portfolio |
+| Fees | 0.25% per trade (Alpaca's tier-1 taker fee), plus 5 bps slippage |
+| Metrics | Return, volatility, Sharpe, drawdown; C1 compared with C0 only |
 
 ## Changelog
 
 - **v0.1** · Sat 14 Nov 2026 · First draft from decisions D1–D5.
+- **v0.2** · Sat 14 Nov 2026 · Gate 1 numbers approved. Applied D6 (daily only), D7 (crypto side experiment, new §13), D8 (OpenRouter, provider pinning), D9 (five models; Grok added as agent 12, DeepSeek replaces Kimi as 11; agents 12–14 renumbered 13–15). Margin interest set to Alpaca's 6.5%. Agent 7 may hold all cash; AI agents aren't told about other agents.
