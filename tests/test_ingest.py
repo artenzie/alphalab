@@ -56,9 +56,10 @@ def weekdays(start, end):
 
 
 class FakeTrading:
-    def __init__(self, untradable=(), sessions=None):
+    def __init__(self, untradable=(), sessions=None, early_closes=()):
         self.untradable = set(untradable)
         self.sessions = sessions  # None: every weekday is a session
+        self.early_closes = set(early_closes)  # these close at 13:00 ET
         self.calendar_requests = []
 
     def get_asset(self, sym):
@@ -68,7 +69,9 @@ class FakeTrading:
         self.calendar_requests.append(req)
         days = weekdays(req.start, req.end) if self.sessions is None else \
             [d for d in self.sessions if req.start <= d <= req.end]
-        return [SimpleNamespace(date=d) for d in days]
+        # Like alpaca-py: open/close as ET wall-clock times.
+        return [SimpleNamespace(date=d, open="09:30", close="13:00" if d in self.early_closes else "16:00")
+                for d in days]
 
 
 class FakeStock:
@@ -100,11 +103,12 @@ class FakeCrypto:
         return SimpleNamespace(data={s: in_window(b, req) for s, b in self.data.items()})
 
 
-def clients(raw=None, split=None, crypto=None, failures=(), untradable=(), sessions=None, fail_after=None):
+def clients(raw=None, split=None, crypto=None, failures=(), untradable=(), sessions=None, fail_after=None,
+            early_closes=()):
     raw = {"AAPL": [bar(EQ_TS)]} if raw is None else raw
     split = raw if split is None else split
     crypto = {"BTC/USD": [bar(CR_TS, close=70000.0)]} if crypto is None else crypto
-    return ingest.Clients(FakeTrading(untradable, sessions), FakeStock(raw, split, failures, fail_after),
+    return ingest.Clients(FakeTrading(untradable, sessions, early_closes), FakeStock(raw, split, failures, fail_after),
                           FakeCrypto(crypto))
 
 
@@ -203,6 +207,52 @@ def test_equity_bar_before_close_rejected(conn):
 def test_equity_bar_at_close_accepted(conn):
     assert do_run(conn, clients(crypto={}), now=datetime(2026, 11, 13, 21, 0, tzinfo=UTC)) == 0
     assert [r["symbol"] for r in prices(conn)] == ["AAPL"]
+
+
+# Fri 27 Nov 2026: early close at 13:00 ET (EST, UTC-5) = 18:00Z. Protocol §3
+# fetches at close + 1:30 = 14:30 ET = 19:30Z, so the bar must be accepted then.
+BLACK_FRIDAY_TS = datetime(2026, 11, 27, 5, tzinfo=UTC)
+
+
+def early_close_clients():
+    return clients(raw={"AAPL": [bar(BLACK_FRIDAY_TS)]}, crypto={}, early_closes={date(2026, 11, 27)})
+
+
+def test_early_close_bar_accepted_at_1430_et(conn):
+    assert do_run(conn, early_close_clients(), now=datetime(2026, 11, 27, 19, 30, tzinfo=UTC)) == 0
+    assert [(r["symbol"], r["bar_date"]) for r in prices(conn)] == [("AAPL", "2026-11-27")]
+    assert events(conn)[-1][1]["coverage"]["AAPL"]["unexpected"] == []
+
+
+def test_early_close_bar_rejected_before_1300_et(conn):
+    assert do_run(conn, early_close_clients(), now=datetime(2026, 11, 27, 17, 59, tzinfo=UTC)) == 0
+    assert prices(conn) == []
+    assert events(conn)[-1][1]["per_symbol"]["AAPL"]["rejected_unclosed"] == 1
+
+
+def test_close_comes_from_cached_calendar(conn):
+    do_run(conn, early_close_clients(), now=datetime(2026, 11, 27, 19, 30, tzinfo=UTC))
+    row = conn.execute("SELECT close_ts FROM market_sessions WHERE session_date = '2026-11-27'").fetchone()
+    assert row["close_ts"] == "2026-11-27T18:00:00.000Z"
+
+
+def test_bar_on_a_day_with_no_session_uses_1600_et(conn):
+    # Wed 11 Nov dropped as a fake holiday; a bar dated that day waits for 16:00 ET.
+    ts = datetime(2026, 11, 11, 5, tzinfo=UTC)
+    sessions = [x for x in weekdays(date(2024, 11, 1), date(2027, 12, 31)) if x != date(2026, 11, 11)]
+    cl = clients(raw={"AAPL": [bar(ts)]}, crypto={}, sessions=sessions)
+    assert do_run(conn, cl, now=datetime(2026, 11, 11, 20, 59, tzinfo=UTC)) == 0
+    assert prices(conn) == []
+    assert do_run(conn, cl, now=datetime(2026, 11, 11, 21, 0, tzinfo=UTC)) == 0
+    assert len(prices(conn)) == 1
+
+
+def test_calendar_unavailable_stops_run(conn):
+    cl = clients(crypto={})
+    cl.trading.get_calendar = lambda req: (_ for _ in ()).throw(api_error(403))
+    assert do_run(conn, cl) == 1
+    assert prices(conn) == []
+    assert events(conn)[-1][0] == "error"
 
 
 def test_crypto_bar_before_midnight_utc_rejected(conn):

@@ -6,7 +6,9 @@ versioned rows: a new version of a bar is written only when its values differ
 from the latest stored version, so re-runs don't pile up duplicates.
 
 Bars for days that haven't closed yet are never stored (CLAUDE.md rule 1):
-  * equity bar for date D: only once it's 16:00 America/New_York on D
+  * equity bar for date D: only once D's session has closed, using the real
+    close from the cached market calendar (13:00 ET on early-close days);
+    16:00 ET for a bar dated on a day with no session
   * crypto bar starting at T (00:00 UTC): only once it's T + 24h
 
 Usage:
@@ -45,6 +47,7 @@ from zoneinfo import ZoneInfo
 
 import requests
 
+from data import calendar as cal
 from data import db
 
 JOB = "fetch_prices"
@@ -52,7 +55,7 @@ ROOT = Path(__file__).resolve().parents[1]
 UNIVERSE_CSV = ROOT / "research" / "universe" / "universe.csv"
 CRYPTO_SYMBOLS = ("BTC/USD", "ETH/USD", "SOL/USD", "XRP/USD", "DOGE/USD")  # §13
 NY = ZoneInfo("America/New_York")
-EQUITY_CLOSE_HOUR = 16  # 16:00 ET; conservative on early-close days
+EQUITY_CLOSE_HOUR = 16  # 16:00 ET: fallback for bars dated on a day with no session
 
 # Waits between attempts: 3 attempts over ~2 minutes.
 RETRY_DELAYS = (30, 90)
@@ -205,10 +208,32 @@ def equity_bar_date(bar_ts: datetime) -> str:
     return as_utc(bar_ts).astimezone(NY).date().isoformat()
 
 
-def equity_bar_closed(bar_ts: datetime, now: datetime) -> bool:
+def default_close(d: date) -> datetime:
+    """16:00 ET on d: the close when the calendar has no session for d."""
+    return datetime(d.year, d.month, d.day, EQUITY_CLOSE_HOUR, tzinfo=NY)
+
+
+def equity_bar_closed(bar_ts: datetime, now: datetime,
+                      close_of: Callable[[date], datetime | None] | None = None) -> bool:
+    """True once the session of the bar's date has closed.
+
+    `close_of(d)` gives the session close (None: no session that day, so 16:00 ET).
+    Without it, 16:00 ET is used.
+    """
     d = as_utc(bar_ts).astimezone(NY).date()
-    close = datetime(d.year, d.month, d.day, EQUITY_CLOSE_HOUR, tzinfo=NY)
-    return now >= close
+    close = close_of(d) if close_of is not None else None
+    return now >= (close or default_close(d))
+
+
+def calendar_closes(conn: sqlite3.Connection, trading: Any) -> Callable[[date], datetime | None]:
+    """close_of(d) from the cached calendar: real (early) closes; None on closed days.
+
+    CalendarUnavailable propagates: we never guess a close.
+    """
+    def close_of(d: date) -> datetime | None:
+        s = cal.session(d, conn, trading)
+        return None if s is None else s.close
+    return close_of
 
 
 def crypto_bar_date(bar_ts: datetime) -> str:
@@ -306,11 +331,12 @@ def expected_equity_days(clients: Clients, start: date, now: datetime, sleep) ->
     from alpaca.trading.requests import GetCalendarRequest
 
     req = GetCalendarRequest(start=start, end=as_utc(now).astimezone(NY).date())
-    cal = with_retries(lambda: clients.trading.get_calendar(req), "trading calendar", sleep)
+    sessions = with_retries(lambda: clients.trading.get_calendar(req), "trading calendar", sleep)
     days = []
-    for c in cal:
+    for c in sessions:
         d = _as_date(c.date)
-        if d >= start and now >= datetime(d.year, d.month, d.day, EQUITY_CLOSE_HOUR, tzinfo=NY):
+        close = cal._alpaca_time(d, c.close) if getattr(c, "close", None) is not None else default_close(d)
+        if d >= start and now >= close:
             days.append(d.isoformat())
     return sorted(set(days))
 
@@ -423,7 +449,8 @@ def heartbeat(conn, run_id: str, event: str, detail: dict) -> None:
                      (run_id, JOB, event, db.utc_ts(), json.dumps(detail, sort_keys=True)))
 
 
-def build_rows(equity_raw, equity_split, crypto, now: datetime, stats: Stats) -> list[dict]:
+def build_rows(equity_raw, equity_split, crypto, now: datetime, stats: Stats,
+               close_of: Callable[[date], datetime | None] | None = None) -> list[dict]:
     rows = []
     for sym in sorted(set(equity_raw) | set(equity_split)):
         raw = {equity_bar_date(b.timestamp): b for b in equity_raw.get(sym, [])}
@@ -434,7 +461,7 @@ def build_rows(equity_raw, equity_split, crypto, now: datetime, stats: Stats) ->
         for d in sorted(raw):
             s = stats.sym(sym)
             s["fetched"] += 1
-            if not equity_bar_closed(raw[d].timestamp, now):
+            if not equity_bar_closed(raw[d].timestamp, now, close_of):
                 s["rejected_unclosed"] += 1
                 continue
             rows.append(make_row(sym, "us_equity", d, raw[d], adj[d], "iex"))
@@ -480,12 +507,13 @@ def run(conn: sqlite3.Connection, clients: Clients, days: int = 5,
         if not chunks:
             raise IngestError(f"start {db.utc_ts(start)} is not before now")
         check_crypto_assets(clients, crypto_symbols, sleep)
+        close_of = calendar_closes(conn, clients.trading)
         for i, (a, b) in enumerate(chunks):
             if i:
                 sleep(chunk_pause)
             eq_raw, eq_split = fetch_equity(clients, equity_symbols, a, b, sleep)
             cr = fetch_crypto(clients, crypto_symbols, a, b, sleep)
-            rows = build_rows(eq_raw, eq_split, cr, now(), stats)
+            rows = build_rows(eq_raw, eq_split, cr, now(), stats, close_of)
             fetched_at = db.utc_ts(now())
             store(conn, rows, fetched_at, stats)
             fetched_ats.append(fetched_at)
