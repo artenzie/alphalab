@@ -8,16 +8,28 @@ AlphaLab is a research project that runs AI trading agents against Alpaca **pape
 
 ## Layout
 
-| Folder | Purpose |
+| Path | Purpose |
 |---|---|
-| `research/logs/` | Dated learning logs (`YYYY-MM-DD.md`) |
-| `agents/prompts/` | Agent configs and prompts |
-| `strategies/` | Strategy definitions |
-| `data/` | Market data and snapshots |
-| `execution/` | Order placement / broker integration |
-| `analysis/` | Performance analysis |
-| `dashboard/` | Monitoring UI |
-| `tests/` | Tests |
+| `research/experiment_protocol.md` | The protocol (currently **v1.4**); § numbers in code refer to it |
+| `research/decisions.md`, `research/logs/` | Design decisions (D1, D2, …) and dated learning logs |
+| `research/universe/` | Frozen universe (`universe.csv`) + holdings evidence |
+| `data/db.py` | SQLite schema setup (`schema.sql`) and connections; append-only triggers |
+| `data/ingest.py` | Daily Alpaca bars into versioned `prices` rows; never stores unclosed bars |
+| `data/calendar.py` | NYSE trading days, closes, daily run times (all UTC) |
+| `data/checks.py` | Data checks on stored bars, run after every ingest |
+| `data/snapshot.py` | Point-in-time daily snapshot: the only data an agent sees |
+| `strategies/base.py` | Agent interface: `decide(snapshot, portfolio, context) -> Decision` |
+| `strategies/registry.py` | Agent id -> decide function |
+| `strategies/benchmark.py` … | Agents 1-6: benchmark, equal_weight, momentum, mean_reversion, trend, long_short |
+| `execution/risk.py` | §6 risk checks (`apply_risk`, `margin_check`), pure functions |
+| `scripts/` | One-off tools: build_universe, OpenRouter model checks, backtest_indicators/risk |
+| `tests/` | pytest suite |
+| `agents/prompts/`, `analysis/`, `dashboard/` | Not built yet |
+
+## Working here
+
+- Run tests: `venv/bin/python -m pytest`
+- Use plan mode for anything touching the ledger, snapshot, risk checks or protocol.
 
 ## Non-negotiable rules
 
