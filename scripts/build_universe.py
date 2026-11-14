@@ -66,7 +66,7 @@ try:
     from alpaca.trading.client import TradingClient
     tc = TradingClient(os.getenv("ALPACA_API_KEY"), os.getenv("ALPACA_SECRET_KEY"), paper=True)
     for c in chosen:
-        a = tc.get_asset(c["symbol"].replace(".", "/") if "." in c["symbol"] else c["symbol"])
+        a = tc.get_asset(c["symbol"])
         c.update(tradable=a.tradable, shortable=a.shortable, easy_to_borrow=a.easy_to_borrow, fractionable=a.fractionable)
 except Exception as e:  # report, don't hide
     print(f"Alpaca check failed: {type(e).__name__}: {e}")
