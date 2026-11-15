@@ -295,6 +295,37 @@ def test_no_cash_means_no_buys():
     assert plan == [(0, None)] and json.loads(events[0]["detail"])["applied_qty"] == 0
 
 
+def test_buy_scaled_under_one_dollar_is_cancelled_and_logged():
+    """$0.50 of cash for a $10.005 buy: scaled to 0.5 / 10.005 shares (~$0.50), under $1 -> cancelled."""
+    a = acct(0.5)
+    plan, events, a2, fills = floor_fill(a, [Order("B", "buy", 1.0, target_weight=0.1)], {"B": 10.0})
+    assert plan == [(0, None)] and fills == [] and a2.cash == 0.5
+    assert events[0]["applied_weight"] == 0.0 and events[0]["requested_weight"] == 0.1
+    d = json.loads(events[0]["detail"])
+    assert d["applied_qty"] == 0 and d["cancelled"] == "scaled value under $1"
+    assert d["scaled_qty"] == pytest.approx(0.5 / 10.005, abs=1e-8) and d["scaled_value"] == pytest.approx(0.5, abs=1e-6)
+
+
+def test_buy_scaled_just_over_one_dollar_still_fills():
+    a = acct(1.01)
+    plan, events, a2, fills = floor_fill(a, [Order("B", "buy", 1.0)], {"B": 10.0})
+    assert len(fills) == 1 and fills[0].qty * 10.0 * 1.0005 == pytest.approx(1.01, abs=1e-6)
+    assert "cancelled" not in json.loads(events[0]["detail"]) and 0 <= a2.cash < 1e-6
+
+
+def test_cancelling_a_dust_buy_keeps_the_factor_for_the_others():
+    """Two buys scaled by the same k: the big one fills at k, the tiny one is cancelled, its cash stays."""
+    a = acct(500)
+    orders = [Order("A", "buy", 10.0), Order("B", "buy", 0.01)]       # 1000.5 + 1.0005 at 100
+    plan, events, a2, fills = floor_fill(a, orders, {"A": 100.0, "B": 100.0})
+    k = json.loads(events[0]["detail"])["factor"]
+    assert k == pytest.approx(500 / (1_000.5 + 1.0005))
+    assert [i for i, o in plan if o is None] == [1] and [f.symbol for f in fills] == ["A"]
+    assert fills[0].qty == L.round_long(10.0 * k)
+    assert json.loads(events[1]["detail"])["factor"] == k
+    assert a2.cash == pytest.approx(0.01 * 100 * 1.0005 * k, abs=1e-6)      # B's share, under $1, left as cash
+
+
 def test_crypto_fee_is_included_in_the_floor():
     a = acct(1_000)
     orders = [Order("BTC/USD", "buy", 10.0)]                # 10 * 100.05 * 1.0025 = 1003.00125

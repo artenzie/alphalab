@@ -331,10 +331,8 @@ def test_cash_floor_gap_up_scales_the_buy_and_logs_it(conn):
     assert settle(conn, "2", WED).interest == 0
 
 
-def test_cash_floor_scales_an_unfunded_buy_to_dust(conn):
-    """Fully invested (cash < $0.000001): a buy with no sells to fund it fills ~0 shares.
-
-    (A buy is cancelled outright only when cash is <= 0 exactly; see test_ledger.)"""
+def test_cash_floor_cancels_an_unfunded_dust_buy(conn):
+    """Fully invested (cash < $0.000001): a buy with no sells to fund it scales to dust and is cancelled."""
     buy_a_on_monday(conn, agent="2", weight=1.0)
     add(conn, "A", TUE, 110.0)
     add(conn, "B", TUE, 10.0)
@@ -343,9 +341,17 @@ def test_cash_floor_scales_an_unfunded_buy_to_dust(conn):
     add(conn, "A", WED, 110.0)
     add(conn, "B", WED, 10.0)
     res = settle(conn, "2", WED)
-    assert len(res.floor_events) == 1 and res.fills[0].qty * res.fills[0].fill_price < 1e-6
+    assert len(res.floor_events) == 1 and res.fills == ()
     assert 0 <= res.mark.cash < 1e-6
+    oid = conn.execute("SELECT order_id FROM orders WHERE symbol = 'B'").fetchone()[0]
+    f = conn.execute("SELECT * FROM fills WHERE order_id = ?", (oid,)).fetchone()
+    ev = conn.execute("SELECT * FROM risk_events WHERE symbol = 'B' AND rule = 'cash_floor'").fetchone()
+    assert f["status"] == "cancelled"
+    assert json.loads(f["detail"]) == {"reason": "cash_floor", "risk_event_id": ev["risk_event_id"]}
+    d = json.loads(ev["detail"])
+    assert d["cancelled"] == "scaled value under $1" and d["applied_qty"] == 0 and ev["applied_weight"] == 0
     assert not LD.pending_orders(conn, "2")
+    assert count(conn, "positions") == 2                    # Tue A, Wed A: no B position
 
 
 def test_agents_without_the_floor_still_borrow_and_pay_interest(conn):

@@ -1,4 +1,4 @@
-"""The simulated ledger's accounting core (protocol §7 v1.5, ledger rules 1-11): pure functions.
+"""The simulated ledger's accounting core (protocol §7 v1.7, ledger rules 1-12): pure functions.
 
     orders = plan_orders(account, targets, closes)              # decision day D, at D's close
     account, fills = fill(account, orders, opens)               # D+1, at the official open
@@ -33,7 +33,8 @@ Rules, as written in protocol §7:
  12. cash_floor (agents with has_cash_floor: long only, 100% gross limit)
      puts the day's sells first and scales all buys down pro rata so the fills
      never take cash below 0. Each scaled buy is a 'cash_floor' risk event.
-     Scaled buys are filled even under $100 (the minimum is a decision-time rule).
+     Scaled buys are filled even under $100 (the minimum is a decision-time rule),
+     but a buy scaled to under MIN_FLOOR_BUY_USD ($1) is cancelled.
 
 Money is kept as unrounded floats; the accounting identity (change in equity
 = price P&L - slippage - fees - borrow - interest) holds to well under a cent.
@@ -61,6 +62,7 @@ CRYPTO_FEE = 0.0025        # §13: Alpaca tier-1 taker fee
 SHARE_DP = 9               # Alpaca fractional precision
 EPS_USD = 1e-9             # float noise allowed in the $100 test
 FLOOR_HAIRCUT = 1e-12      # scale buys a hair under exact, so float noise can't end below $0
+MIN_FLOOR_BUY_USD = 1.0    # rule 12: a buy scaled to under this (at the fill price) is cancelled
 
 ORIGINS = ("decision", "margin", "delisting")
 
@@ -248,10 +250,13 @@ def cash_floor(account: Account, orders: list[Order], ref_prices: Mapping[str, f
 
     Returns (plan, events). plan is [(index into orders, order to fill or None)]
     in fill order: sells as given, then buys, each scaled by the same factor k
-    (shares rounded down; None when scaled to nothing). events has one
+    (shares rounded down; None when its scaled value at the fill price,
+    slippage and fee included, is under MIN_FLOOR_BUY_USD). events has one
     risk_events-shaped dict per scaled buy (empty when nothing is scaled).
     applied_weight is the target weight x k, an approximation; the exact
-    quantities are in detail.
+    quantities are in detail. A cancelled buy has applied_qty and
+    applied_weight 0 and says why in detail['cancelled']; k is not
+    recomputed, so the cash it would have used stays as cash.
     """
     bps = slippage_bps / 10_000
     sells = [(i, o) for i, o in enumerate(orders) if o.side == "sell"]
@@ -266,15 +271,19 @@ def cash_floor(account: Account, orders: list[Order], ref_prices: Mapping[str, f
     events = []
     for i, o in buys:
         q = round_long(o.qty * k)
-        plan.append((i, replace(o, qty=q) if q > 0 else None))
+        value = q * _price(ref_prices, o.symbol) * (1 + bps) * (1 + fee_rate)
+        cancel = value < MIN_FLOOR_BUY_USD
+        detail = {"requested_qty": o.qty, "applied_qty": 0.0 if cancel else q, "factor": k,
+                  "cash_after_sells": cash_after_sells, "buy_cost": cost,
+                  "applied_weight_is": "target_weight x factor (approximate)"}
+        if cancel:
+            detail.update(cancelled=f"scaled value under ${MIN_FLOOR_BUY_USD:g}", scaled_qty=q, scaled_value=value)
+        plan.append((i, None if cancel else replace(o, qty=q)))
         events.append({
             "event_type": "clip", "rule": "cash_floor", "symbol": o.symbol,
             "requested_weight": o.target_weight,
-            "applied_weight": None if o.target_weight is None else o.target_weight * k,
-            "detail": json.dumps({"requested_qty": o.qty, "applied_qty": q, "factor": k,
-                                  "cash_after_sells": cash_after_sells, "buy_cost": cost,
-                                  "applied_weight_is": "target_weight x factor (approximate)"},
-                                 sort_keys=True)})
+            "applied_weight": None if o.target_weight is None else (0.0 if cancel else o.target_weight * k),
+            "detail": json.dumps(detail, sort_keys=True)})
     return plan, events
 
 

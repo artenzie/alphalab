@@ -1,4 +1,4 @@
-"""The ledger's database layer (protocol §7 v1.5, §9): load and store what execution/ledger.py computes.
+"""The ledger's database layer (protocol §7 v1.7, §9): load and store what execution/ledger.py computes.
 
 Two calls per agent per trading day, in this order:
 
@@ -36,7 +36,7 @@ Cash floor (rule 12): for agents with ledger.has_cash_floor, the pending
 orders go through ledger.cash_floor before filling: sells first, buys scaled
 pro rata so cash can't end below 0. Each scaled buy gets a 'cash_floor'
 risk_events row (with its order's decision_id); its fill row has the scaled
-qty and the event id in detail, or is 'cancelled' if scaled to nothing. The
+qty and the event id in detail, or is 'cancelled' if scaled to under $1. The
 orders rows keep the quantities as placed (append-only).
 
 Accounts are rebuilt from the last equity row and its positions rows; with no
