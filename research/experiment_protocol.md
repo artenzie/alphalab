@@ -1,6 +1,6 @@
 # Experiment protocol
 
-**Version:** v1.7, Sun 15 Nov 2026 (Gate 1 + crypto timings + day-1 decisions + agent 4/5 clarifications + agent 4 capacity, pro rata clipping + ledger rules + cash floor + dust buys)
+**Version:** v1.8, Sun 15 Nov 2026 (Gate 1 + crypto timings + day-1 decisions + agent 4/5 clarifications + agent 4 capacity, pro rata clipping + ledger rules + cash floor + dust buys + complete targets)
 **Next:** final freeze as `protocol-v2.0` on Sun 10 Jan 2027, after the shakedown.
 
 All numbers were approved at the Gate 1 review on Sat 14 Nov 2026. The universe and model lineup were filled in from the Gate 1 scripts the same evening. Everything follows from decisions D1–D9 in `research/decisions.md`.
@@ -147,9 +147,9 @@ AI agents are not told what other agents exist or how they are doing.
 | Dividends | Ignored for every agent alike (simplification, stated in the paper) |
 | Minimum trade | Trades under $100 are skipped, to avoid noise from tiny rebalances |
 
-**Ledger rules** (v1.7; how the table above is applied):
+**Ledger rules** (v1.8; how the table above is applied):
 
-1. **Sizing at the decision close.** Target shares = weight × portfolio value at the decision-day close ÷ that day's close, using exactly the closes in the snapshot. Order = target − current shares, so an unchanged weight creates no trade. A symbol an agent leaves out keeps its shares.
+1. **Sizing at the decision close.** Target shares = weight × portfolio value at the decision-day close ÷ that day's close, using exactly the closes in the snapshot. Order = target − current shares, so an unchanged weight creates no trade. A non-hold decision is the agent's complete target portfolio: a held symbol it leaves out has a target of 0 and is sold (or bought back), subject to the $100 minimum (rule 2). A hold trades nothing.
 2. **Minimum trade.** An order worth under $100 at the decision close (the whole change in shares) is skipped.
 3. **Rounding.** Long targets are rounded down to 9 decimals of a share; short targets are rounded towards zero to whole shares. A flip from long to short (or back) is two orders: close the old side, then open the new one.
 4. **Fills.** Equities fill at the next trading day's official open with 5 bps slippage against the agent (buys pay more, sells receive less). Crypto (§13) fills at the next available price after the decision time, plus the 0.25% fee and 5 bps slippage.
@@ -256,3 +256,4 @@ Reported separately. Never ranked or tested against the equity agents.
 - **v1.5** · Sun 15 Nov 2026 · §7 ledger rules written down before the ledger was coded; no number changed. Sizing at the decision close; $100 minimum on the whole order; long shares to 9 decimals, shorts whole shares towards zero; flips as two orders; crypto fills at the next price after decide time; accruals every calendar day on a 360-day year, charged in arrears; margin cut replaced by a same-day non-hold decision; delisting at the last price; restart safety; no fill before the next bar is closed and stored; a split between decision and fill stops the ledger.
 - **v1.6** · Sun 15 Nov 2026 · §7 ledger rule 12, cash floor: long-only agents with a 100% gross limit (1, 2, 3, 5, 7, 14, C0, C1) fill sells first and scale the day's buys down pro rata so a fill never takes cash below 0; logged as `cash_floor` risk events. Rule 5 notes the exception. Prompted by the smoke run, where agent 2's day-1 buys at the open left cash at −$69.51.
 - **v1.7** · Sun 15 Nov 2026 · §7 rule 12: a buy the cash floor scales to under $1 is cancelled instead of filling a few billionths of a share; its `cash_floor` event says so. The cash it would have used stays as cash. Follows the dust-buy note in the 15 Nov log.
+- **v1.8** · Sun 15 Nov 2026 · §7 rule 1: a non-hold decision is the complete target portfolio; a held symbol left out goes to 0 (replaces "a symbol an agent leaves out keeps its shares"). The §6 risk checks therefore see the whole resulting portfolio. Prompted by the first two-year control backtest, where agents 3–6 never sold stocks they dropped (agent 6 reached 2.9× gross, agent 5's buys went unfunded every day).
