@@ -18,8 +18,9 @@ Check for agent 1. It is sized at the day-1 close C0 and filled at the day-2
 open O (plus 5 bps), so with s = V0 / C0 shares its final equity is exactly
     V0 - s * O * 1.0005 + s * P_end - interest - borrow
 i.e. return = (O / C0) * [(P_end / O - 1) - 0.0005] - interest / V0: SPY's
-open-to-end return minus one slippage charge, scaled by O / C0, less a few
-dollars of margin interest when O > C0 leaves cash slightly negative.
+open-to-end return minus one slippage charge, scaled by O / C0. When O > C0
+the cash floor (rule 12) scales the buy so cash ends at 0 instead; the check
+uses the shares actually filled, so it holds either way.
 """
 
 from __future__ import annotations
@@ -111,9 +112,10 @@ def run(db_path: Path, n_sessions: int = 20) -> dict:
                             (aid, sid, db.utc_ts(decided_at), json.dumps(weights), dec.reason)).lastrowid
                         LD.write_risk_events(conn, aid, events, decided_at, did)
                     placed = LD.place_orders(conn, aid, d, closes, weights, decided_at, did)
-                    days.append({"date": d, "equity": res.mark.equity, "fills": res.fills, "borrow": res.borrow,
-                                 "interest": res.interest, "orders": placed.orders, "clips": len(events),
-                                 "margin": len(placed.margin_events)})
+                    days.append({"date": d, "equity": res.mark.equity, "cash": res.mark.cash, "fills": res.fills,
+                                 "borrow": res.borrow, "interest": res.interest, "orders": placed.orders,
+                                 "clips": len(events), "margin": len(placed.margin_events),
+                                 "floor": res.floor_events})
                 report["agents"][agent_id] = {"name": registry.NAMES[agent_id], "days": days}
             report["spy"] = spy_check(conn, sessions, report["agents"][1]["days"])
         finally:
@@ -128,10 +130,11 @@ def spy_check(conn, sessions, days) -> dict:
     v0, v_end = days[0]["equity"], days[-1]["equity"]
     interest = sum(x["interest"] for x in days)
     borrow = sum(x["borrow"] for x in days)
-    s = L.round_long(v0 / c0)
+    s = sum(f.qty for x in days for f in x["fills"] if f.symbol == "SPY")   # shares filled (cash floor may scale)
     predicted_end = v0 - s * o * (1 + L.SLIPPAGE_BPS / 1e4) + s * p_end - interest - borrow
     return {"c0": c0, "open": o, "p_end": p_end, "spy_open_to_end": p_end / o - 1,
-            "spy_close_to_end": p_end / c0 - 1, "agent_return": v_end / v0 - 1,
+            "spy_close_to_end": p_end / c0 - 1, "agent_return": v_end / v0 - 1, "shares": s,
+            "floor_scaled": any(x["floor"] for x in days),
             "formula_return": (o / c0) * ((p_end / o - 1) - L.SLIPPAGE_BPS / 1e4) - interest / v0,
             "slippage_usd": s * o * L.SLIPPAGE_BPS / 1e4, "interest": interest,
             "predicted_end": predicted_end, "agent_end": v_end, "diff_usd": v_end - predicted_end}
@@ -148,12 +151,15 @@ def format_report(r: dict) -> str:
                      f"return {days[-1]['equity'] / days[0]['equity'] - 1:+.4%}")
         lines.append(f"  fills {len(fills)}  slippage ${sum(f.slippage_usd for f in fills):,.2f}  "
                      f"interest ${sum(d['interest'] for d in days):,.2f}  borrow ${sum(d['borrow'] for d in days):,.2f}  "
-                     f"clips {sum(d['clips'] for d in days)}  margin events {sum(d['margin'] for d in days)}")
+                     f"clips {sum(d['clips'] for d in days)}  margin events {sum(d['margin'] for d in days)}  "
+                     f"cash_floor events {sum(len(d['floor']) for d in days)}")
+        lines.append(f"  cash: min {min(d['cash'] for d in days):,.6f}  final {days[-1]['cash']:,.6f}")
         for d in days:
             if d["fills"]:
                 buys = sum(f.qty * f.fill_price for f in d["fills"] if f.side == "buy")
                 sells = sum(f.qty * f.fill_price for f in d["fills"] if f.side == "sell")
-                lines.append(f"    {d['date']}: {len(d['fills'])} fills, bought ${buys:,.2f}, sold ${sells:,.2f}")
+                lines.append(f"    {d['date']}: {len(d['fills'])} fills, bought ${buys:,.2f}, sold ${sells:,.2f}, "
+                             f"cash after ${d['cash']:,.6f}, {len(d['floor'])} buys scaled by the cash floor")
         lines.append("")
     c = r["spy"]
     lines += [
@@ -163,7 +169,8 @@ def format_report(r: dict) -> str:
         f"  SPY return, day-1 close -> last close  {c['spy_close_to_end']:+.6%}",
         f"  Agent 1 return                         {c['agent_return']:+.6%}",
         f"  (O/C0)*[SPY open->end - 5 bps] - interest/V0 = {c['formula_return']:+.6%}",
-        f"  one slippage charge ${c['slippage_usd']:,.2f}; margin interest ${c['interest']:,.2f}",
+        f"  one slippage charge ${c['slippage_usd']:,.2f}; margin interest ${c['interest']:,.2f}; "
+        f"{c['shares']:.9f} shares filled{' (scaled by the cash floor)' if c['floor_scaled'] else ''}",
         f"  agent 1 final equity {c['agent_end']:,.4f} vs formula {c['predicted_end']:,.4f}: "
         f"diff ${c['diff_usd']:+.6f}",
         "",
