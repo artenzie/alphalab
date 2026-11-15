@@ -1,4 +1,4 @@
-"""The simulated ledger's accounting core (protocol §7 v1.7, ledger rules 1-12): pure functions.
+"""The simulated ledger's accounting core (protocol §7 v1.8, ledger rules 1-12): pure functions.
 
     orders = plan_orders(account, targets, closes)              # decision day D, at D's close
     account, fills = fill(account, orders, opens)               # D+1, at the official open
@@ -13,7 +13,8 @@ layer (execution/ledger_db.py) loads and stores accounts and runs the day.
 Rules, as written in protocol §7:
   1. Target shares = weight x portfolio value at the decision close / that close,
      with exactly the closes the agent saw. Order = target - current shares.
-     A symbol the targets leave out keeps its shares; a hold (None) trades nothing.
+     Non-hold targets are the complete portfolio: a held symbol they leave out
+     has target 0 (v1.8). A hold (None) trades nothing.
   2. An order worth under $100 at the decision close (the whole change) is skipped.
   3. Long targets are rounded down to 9 decimals of a share, short targets
      towards zero to whole shares. A flip is two orders: close, then open.
@@ -194,15 +195,17 @@ def plan_orders(account: Account, targets: Mapping[str, float] | None, closes: M
                 origin: str = "decision", min_trade: float = MIN_TRADE_USD) -> list[Order]:
     """Turn target weights into share orders at the decision close (rules 1-3).
 
-    closes must have every held symbol and every target symbol. Orders come out
-    by symbol, a flip as its two legs (close first).
+    targets are the complete target portfolio: a held symbol not in targets
+    has weight 0. closes must have every held symbol and every target symbol.
+    Orders come out by symbol, a flip as its two legs (close first).
     """
     if targets is None:
         return []
     pv = account.value(closes)
     orders: list[Order] = []
-    for s in sorted(targets):
-        w = targets[s]
+    held = {s for s, p in account.positions.items() if p.qty != 0}
+    for s in sorted(set(targets) | held):
+        w = targets.get(s, 0.0)
         if isinstance(w, bool) or not isinstance(w, (int, float)) or not math.isfinite(w):
             raise LedgerError(f"target weight for {s} must be a finite number, got {w!r}")
         close = _price(closes, s)

@@ -10,7 +10,8 @@
 
 An agent returns a Decision: target weights per symbol (fraction of current
 portfolio value, negative = short), or weights=None to hold with no change,
-plus a one-line reason. Risk limits (§6) are applied afterwards by the risk
+plus a one-line reason. Non-hold weights are the complete target portfolio
+(protocol §7 rule 1, v1.8): a held symbol left out is sold to 0. Risk limits (§6) are applied afterwards by the risk
 checks, not here. Agents get no database, file, network or environment access.
 """
 

@@ -131,10 +131,19 @@ def test_unchanged_weight_creates_no_trade():
     assert L.plan_orders(a, w, closes) == []
 
 
-def test_hold_and_untargeted_symbols_keep_their_shares():
-    a = acct(1_000, A=5)
+def test_hold_trades_nothing_and_untargeted_held_symbols_go_to_zero():
+    a = acct(1_000, A=50)                                   # pv 1000 + 500
     assert L.plan_orders(a, None, {"A": 10.0}) == []
-    assert legs(L.plan_orders(a, {"B": 0.5}, {"A": 10.0, "B": 5.0})) == [("B", "buy", 105.0)]  # pv 1050
+    assert legs(L.plan_orders(a, {"B": 0.5}, {"A": 10.0, "B": 5.0})) == [("A", "sell", 50.0), ("B", "buy", 150.0)]
+    assert legs(L.plan_orders(a, {}, {"A": 10.0})) == [("A", "sell", 50.0)]      # {} = all cash
+    s = acct(10_000, A=-20)                                 # an untargeted short is bought back
+    assert legs(L.plan_orders(s, {}, {"A": 10.0})) == [("A", "buy", 20.0)]
+
+
+def test_untargeted_leftover_under_100_dollars_stays():
+    a = acct(1_000, A=5)                                    # $50 of A: under the $100 minimum
+    assert legs(L.plan_orders(a, {"B": 0.5}, {"A": 10.0, "B": 5.0})) == [("B", "buy", 105.0)]
+    assert L.plan_orders(a, {}, {"A": 10.0}) == []
 
 
 def test_missing_price_and_bad_weight_raise():

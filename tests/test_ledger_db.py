@@ -234,7 +234,9 @@ def test_delisting_closes_at_last_price_and_cancels_pending(conn):
     add(conn, "A", TUE, 100.0)
     add(conn, "B", TUE, 10.0)
     settle(conn, "4", TUE)
-    place(conn, "4", TUE, {"A": 100.0, "B": 10.0}, {"B": 0.2})   # B order pending; A untargeted
+    acct = LD.load_account(conn, "4", as_of=TUE)
+    w_a = acct.shares("A") * 100.0 / acct.value({"A": 100.0, "B": 10.0})
+    place(conn, "4", TUE, {"A": 100.0, "B": 10.0}, {"A": w_a, "B": 0.2})   # B order pending; A kept as is
     add(conn, "A", WED, 100.0)                                 # B: acquired, no bar
     with pytest.raises(LD.PriceNotAvailable):
         settle(conn, "4", WED)
@@ -337,7 +339,9 @@ def test_cash_floor_cancels_an_unfunded_dust_buy(conn):
     add(conn, "A", TUE, 110.0)
     add(conn, "B", TUE, 10.0)
     settle(conn, "2", TUE)                                  # fully invested, cash ~0
-    place(conn, "2", TUE, {"A": 110.0, "B": 10.0}, {"B": 0.1})   # a buy with no sells to fund it
+    acct = LD.load_account(conn, "2", as_of=TUE)
+    w_a = acct.shares("A") * 110.0 / acct.value({"A": 110.0, "B": 10.0})
+    place(conn, "2", TUE, {"A": 110.0, "B": 10.0}, {"A": w_a, "B": 0.1})   # A kept: a buy with no sells to fund it
     add(conn, "A", WED, 110.0)
     add(conn, "B", WED, 10.0)
     res = settle(conn, "2", WED)

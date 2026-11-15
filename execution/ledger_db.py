@@ -1,4 +1,4 @@
-"""The ledger's database layer (protocol §7 v1.7, §9): load and store what execution/ledger.py computes.
+"""The ledger's database layer (protocol §7 v1.8, §9): load and store what execution/ledger.py computes.
 
 Two calls per agent per trading day, in this order:
 
