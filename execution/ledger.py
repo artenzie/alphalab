@@ -17,7 +17,8 @@ Rules, as written in protocol §7:
      has target 0 (v1.8). A hold (None) trades nothing.
   2. An order worth under $100 at the decision close (the whole change) is skipped.
   3. Long targets are rounded down to 9 decimals of a share, short targets
-     towards zero to whole shares. A flip is two orders: close, then open.
+     towards zero to whole shares (a short within SHORT_SNAP of a whole share
+     is snapped to it first: float noise). A flip is two orders: close, then open.
   4. Fills at the reference price (equity: next official open) with 5 bps
      slippage against the agent; crypto adds a 0.25% fee (fee_rate=CRYPTO_FEE).
   5. Short proceeds go to cash; cash earns nothing.
@@ -62,6 +63,7 @@ DAY_COUNT = 360
 CRYPTO_FEE = 0.0025        # §13: Alpaca tier-1 taker fee
 SHARE_DP = 9               # Alpaca fractional precision
 EPS_USD = 1e-9             # float noise allowed in the $100 test
+SHORT_SNAP = 1e-9         # rule 3: a short this close to a whole share is that share count
 FLOOR_HAIRCUT = 1e-12      # scale buys a hair under exact, so float noise can't end below $0
 MIN_FLOOR_BUY_USD = 1.0    # rule 12: a buy scaled to under this (at the fill price) is cancelled
 
@@ -174,7 +176,8 @@ def target_shares(weight: float, pv: float, close: float) -> float:
     if raw > 0:
         return round_long(raw)
     if raw < 0:
-        return float(math.trunc(raw))
+        nearest = round(raw)
+        return float(nearest if abs(raw - nearest) < SHORT_SNAP else math.trunc(raw))
     return 0.0
 
 

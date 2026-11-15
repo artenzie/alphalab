@@ -131,6 +131,25 @@ def test_unchanged_weight_creates_no_trade():
     assert L.plan_orders(a, w, closes) == []
 
 
+def test_drifted_weights_round_trip_to_zero_orders_long_and_short():
+    """Agent 4 keeps positions at shares x close / pv: that must give no order, shorts included."""
+    rng = random.Random(7)
+    for _ in range(20_000):
+        q_short, q_long = -rng.randint(1, 500), round(rng.uniform(0.001, 500), 9)
+        closes = {"S": rng.uniform(5, 900), "L": rng.uniform(5, 900)}
+        a = acct(rng.uniform(5e4, 2e5), S=q_short, L=q_long)
+        pv = a.value(closes)
+        w = {s: a.shares(s) * closes[s] / pv for s in closes}
+        assert L.plan_orders(a, w, closes) == []
+        assert L.target_shares(w["S"], pv, closes["S"]) == q_short
+
+
+def test_short_snap_only_absorbs_float_noise():
+    assert L.target_shares(-9.999999999999998, 1.0, 1.0) == -10.0
+    assert L.target_shares(-9.9999, 1.0, 1.0) == -9.0
+    assert L.target_shares(-9.5, 1.0, 1.0) == -9.0
+
+
 def test_hold_trades_nothing_and_untargeted_held_symbols_go_to_zero():
     a = acct(1_000, A=50)                                   # pv 1000 + 500
     assert L.plan_orders(a, None, {"A": 10.0}) == []
