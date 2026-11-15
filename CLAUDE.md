@@ -10,7 +10,7 @@ AlphaLab is a research project that runs AI trading agents against Alpaca **pape
 
 | Path | Purpose |
 |---|---|
-| `research/experiment_protocol.md` | The protocol (currently **v1.4**); § numbers in code refer to it |
+| `research/experiment_protocol.md` | The protocol (currently **v1.5**); § numbers in code refer to it |
 | `research/decisions.md`, `research/logs/` | Design decisions (D1, D2, …) and dated learning logs |
 | `research/universe/` | Frozen universe (`universe.csv`) + holdings evidence |
 | `data/db.py` | SQLite schema setup (`schema.sql`) and connections; append-only triggers |
@@ -22,7 +22,9 @@ AlphaLab is a research project that runs AI trading agents against Alpaca **pape
 | `strategies/registry.py` | Agent id -> decide function |
 | `strategies/benchmark.py` … | Agents 1-6: benchmark, equal_weight, momentum, mean_reversion, trend, long_short |
 | `execution/risk.py` | §6 risk checks (`apply_risk`, `margin_check`), pure functions |
-| `scripts/` | One-off tools: build_universe, OpenRouter model checks, backtest_indicators/risk |
+| `execution/ledger.py` | §7 ledger accounting core (orders, fills, accruals, marks, margin, delisting), pure functions |
+| `execution/ledger_db.py` | Ledger on the append-only tables: `settle_day` (fill at open, accrue, mark), `place_orders` |
+| `scripts/` | One-off tools: build_universe, OpenRouter model checks, backtest_indicators/risk/ledger |
 | `tests/` | pytest suite |
 | `agents/prompts/`, `analysis/`, `dashboard/` | Not built yet |
 
