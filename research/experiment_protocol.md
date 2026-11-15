@@ -1,6 +1,6 @@
 # Experiment protocol
 
-**Version:** v1.5, Sun 15 Nov 2026 (Gate 1 + crypto timings + day-1 decisions + agent 4/5 clarifications + agent 4 capacity, pro rata clipping + ledger rules)
+**Version:** v1.6, Sun 15 Nov 2026 (Gate 1 + crypto timings + day-1 decisions + agent 4/5 clarifications + agent 4 capacity, pro rata clipping + ledger rules + cash floor)
 **Next:** final freeze as `protocol-v2.0` on Sun 10 Jan 2027, after the shakedown.
 
 All numbers were approved at the Gate 1 review on Sat 14 Nov 2026. The universe and model lineup were filled in from the Gate 1 scripts the same evening. Everything follows from decisions D1–D9 in `research/decisions.md`.
@@ -147,19 +147,20 @@ AI agents are not told what other agents exist or how they are doing.
 | Dividends | Ignored for every agent alike (simplification, stated in the paper) |
 | Minimum trade | Trades under $100 are skipped, to avoid noise from tiny rebalances |
 
-**Ledger rules** (v1.5; how the table above is applied):
+**Ledger rules** (v1.6; how the table above is applied):
 
 1. **Sizing at the decision close.** Target shares = weight × portfolio value at the decision-day close ÷ that day's close, using exactly the closes in the snapshot. Order = target − current shares, so an unchanged weight creates no trade. A symbol an agent leaves out keeps its shares.
 2. **Minimum trade.** An order worth under $100 at the decision close (the whole change in shares) is skipped.
 3. **Rounding.** Long targets are rounded down to 9 decimals of a share; short targets are rounded towards zero to whole shares. A flip from long to short (or back) is two orders: close the old side, then open the new one.
 4. **Fills.** Equities fill at the next trading day's official open with 5 bps slippage against the agent (buys pay more, sells receive less). Crypto (§13) fills at the next available price after the decision time, plus the 0.25% fee and 5 bps slippage.
-5. **Cash.** Short sale proceeds go to cash; cash earns nothing. Sizing at the close and filling at the open can leave a fully invested agent a little below zero cash, which pays margin interest like any other borrowing.
+5. **Cash.** Short sale proceeds go to cash; cash earns nothing. Sizing at the close and filling at the open can leave a fully invested agent a little below zero cash, which pays margin interest like any other borrowing; agents under the cash floor (rule 12) never borrow this way.
 6. **Daily accruals, every calendar day, 360-day year.** Borrow fee 0.50%/yr on short market value; margin interest 6.5%/yr on negative cash. Charged in arrears at each close: every calendar day since the previous close is charged on the balances at that previous close (Monday's close charges Friday, Saturday and Sunday on Friday's balances).
 7. **Mark to market** at each close: equity = cash + Σ shares × close. Dividends are ignored.
 8. **Margin.** The §6 margin check runs at each close, before the decision. If the agent holds, the forced reductions become orders and are filled like any other. If the agent gives new targets, those (risk-checked) targets replace the forced reduction, because they already satisfy the margin rule; the breach is still logged.
 9. **Delisted or acquired stock:** closed at its last traded price (with the usual slippage); the cash stays cash.
 10. **Restart safety.** If fills already exist for an agent and fill date, that day is not filled again.
 11. **No early prices.** The fill for decision day D uses D+1's open only once D+1's bar has closed and is stored (the same closed-bar rule as the ingest). A stock split between decision and fill stops the ledger for a manual correction rather than being sized across.
+12. **Cash floor** (agents whose gross limit is 100% and who can't short: 1, 2, 3, 5, 7, 14, C0, C1). At the open, sells are filled first. If the buys would then take cash below 0, all that day's buys are scaled down pro rata (shares rounded down) so cash ends at 0, and each scaled buy is logged as a risk event (`cash_floor`). A scaled buy is filled even if it falls under $100. Agents allowed more than 100% gross (15) and short-selling agents are not floored; margin interest applies to any negative cash they have.
 
 **Alpaca mirrors (D1):** agents 1, 8 and 13 also send the same orders to three Alpaca paper accounts at the open. Ledger and mirror are reconciled daily; differences are logged, never "fixed" in the ledger.
 
@@ -253,3 +254,4 @@ Reported separately. Never ranked or tested against the equity agents.
 - **v1.3** · Sat 14 Nov 2026 · §5 clarifications, written down before agents 3–6 were coded; no number changed. Agent 4: open positions that aren't exiting keep their 10% target, and it holds when nothing enters or exits. Agent 5: it holds when the set of qualifying stocks hasn't changed. Agents 3–6: only the 22 stocks, ties broken by symbol name, stocks with a missing field are left out, and a not-yet-invested portfolio is caught the next day.
 - **v1.4** · Sat 14 Nov 2026 · §5 agent 4: capacity of 10 open positions (10 × 10% = 100% gross), at most 3 shorts (30%); when entry signals exceed free slots, the largest |z_20| enters first, ties by symbol, the rest are skipped; an entry gets 10% of current portfolio value; no resizing, so open positions keep their drifted weight until they exit (replaces the v1.3 "keep their 10% target"). §6: a breached limit is fixed by scaling the breached side down pro rata, every clip logged. Decided after the 57-session trade count showed agent 4 at up to 20 positions, 200% gross, with 719 of 842 orders being resizes.
 - **v1.5** · Sun 15 Nov 2026 · §7 ledger rules written down before the ledger was coded; no number changed. Sizing at the decision close; $100 minimum on the whole order; long shares to 9 decimals, shorts whole shares towards zero; flips as two orders; crypto fills at the next price after decide time; accruals every calendar day on a 360-day year, charged in arrears; margin cut replaced by a same-day non-hold decision; delisting at the last price; restart safety; no fill before the next bar is closed and stored; a split between decision and fill stops the ledger.
+- **v1.6** · Sun 15 Nov 2026 · §7 ledger rule 12, cash floor: long-only agents with a 100% gross limit (1, 2, 3, 5, 7, 14, C0, C1) fill sells first and scale the day's buys down pro rata so a fill never takes cash below 0; logged as `cash_floor` risk events. Rule 5 notes the exception. Prompted by the smoke run, where agent 2's day-1 buys at the open left cash at −$69.51.
