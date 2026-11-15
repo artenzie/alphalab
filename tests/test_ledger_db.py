@@ -304,3 +304,55 @@ def test_ledger_tables_stay_append_only(conn):
             with conn:
                 conn.execute(f"UPDATE {table} SET recorded_at = recorded_at" if table != "orders"
                              else "UPDATE orders SET qty = qty")
+
+
+# ---------------------------------------------------------------------------
+# Cash floor (rule 12)
+# ---------------------------------------------------------------------------
+
+def test_cash_floor_gap_up_scales_the_buy_and_logs_it(conn):
+    """Agent 2 (floored) sized 1000 A at Mon close 100; Tue opens at 109.45."""
+    placed = buy_a_on_monday(conn, agent="2", weight=1.0)
+    assert [(o.side, o.qty) for o in placed.orders] == [("buy", 1000.0)]
+    add(conn, "A", TUE, 110.0)
+    res = settle(conn, "2", TUE)
+    k = 100_000 / (1000 * 109.45 * 1.0005)
+    assert res.fills[0].qty == pytest.approx(1000 * k, abs=1e-8)
+    assert 0 <= res.mark.cash < 1e-6
+    ev = conn.execute("SELECT * FROM risk_events").fetchone()
+    did = conn.execute("SELECT decision_id FROM orders").fetchone()[0]
+    assert (ev["event_type"], ev["rule"], ev["symbol"], ev["decision_id"]) == ("clip", "cash_floor", "A", did)
+    f = conn.execute("SELECT * FROM fills").fetchone()
+    detail = json.loads(f["detail"])
+    assert f["qty"] < 1000 and detail["risk_event_id"] == ev["risk_event_id"] and detail["requested_qty"] == 1000
+    assert conn.execute("SELECT qty FROM orders").fetchone()[0] == 1000          # order row as placed
+    assert settle(conn, "2", TUE).status == "already_settled" and count(conn, "risk_events") == 1
+    add(conn, "A", WED, 110.0)
+    assert settle(conn, "2", WED).interest == 0
+
+
+def test_cash_floor_scales_an_unfunded_buy_to_dust(conn):
+    """Fully invested (cash < $0.000001): a buy with no sells to fund it fills ~0 shares.
+
+    (A buy is cancelled outright only when cash is <= 0 exactly; see test_ledger.)"""
+    buy_a_on_monday(conn, agent="2", weight=1.0)
+    add(conn, "A", TUE, 110.0)
+    add(conn, "B", TUE, 10.0)
+    settle(conn, "2", TUE)                                  # fully invested, cash ~0
+    place(conn, "2", TUE, {"A": 110.0, "B": 10.0}, {"B": 0.1})   # a buy with no sells to fund it
+    add(conn, "A", WED, 110.0)
+    add(conn, "B", WED, 10.0)
+    res = settle(conn, "2", WED)
+    assert len(res.floor_events) == 1 and res.fills[0].qty * res.fills[0].fill_price < 1e-6
+    assert 0 <= res.mark.cash < 1e-6
+    assert not LD.pending_orders(conn, "2")
+
+
+def test_agents_without_the_floor_still_borrow_and_pay_interest(conn):
+    buy_a_on_monday(conn, agent="4", weight=1.0)            # agent 4 shorts: not floored
+    add(conn, "A", TUE, 110.0)
+    res = settle(conn, "4", TUE)
+    assert res.fills[0].qty == 1000 and res.mark.cash == pytest.approx(100_000 - 1000 * 109.45 * 1.0005)
+    assert count(conn, "risk_events") == 0
+    add(conn, "A", WED, 110.0)
+    assert settle(conn, "4", WED).interest == pytest.approx(-res.mark.cash * 0.065 / 360)

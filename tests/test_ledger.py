@@ -5,6 +5,7 @@ accounting identity over many random days, and that the module is pure.
 """
 
 import ast
+import json
 import math
 import random
 import sys
@@ -17,6 +18,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "tests"))
 from execution import ledger as L  # noqa: E402
+from execution import risk  # noqa: E402
 from execution.ledger import Account, Order, Position  # noqa: E402
 from test_strategies import sealed  # noqa: E402
 
@@ -235,11 +237,86 @@ def test_crypto_fee_and_slippage():
 
 
 # ---------------------------------------------------------------------------
+# Cash floor (rule 12)
+# ---------------------------------------------------------------------------
+
+def floor_fill(a, orders, opens, fee_rate=0.0):
+    plan, events = L.cash_floor(a, orders, opens, fee_rate=fee_rate)
+    a2, fills = L.fill(a, [o for _, o in plan if o is not None], opens, fee_rate=fee_rate)
+    return plan, events, a2, fills
+
+
+def test_which_agents_have_the_cash_floor():
+    floored = {a for a in risk.PROFILES if L.has_cash_floor(a)}
+    assert floored == {"1", "2", "3", "5", "7", "14", "C0", "C1"}
+
+
+def test_gap_up_open_scales_buys_pro_rata_to_zero_cash():
+    a = acct(10_000)
+    orders = L.plan_orders(a, {"A": 0.5, "B": 0.5}, {"A": 100.0, "B": 100.0})   # 50 + 50 shares
+    assert legs(orders) == [("A", "buy", 50.0), ("B", "buy", 50.0)]
+    opens = {"A": 110.0, "B": 110.0}                        # cost 100 * 110 * 1.0005 = 11005.5
+    plan, events, a2, fills = floor_fill(a, orders, opens)
+    k = 10_000 / 11_005.5                                   # 0.908636...
+    assert [f.qty for f in fills] == [L.round_long(50 * k * (1 - L.FLOOR_HAIRCUT))] * 2
+    assert fills[0].qty == pytest.approx(45.43182954, abs=1e-8)
+    assert 0 <= a2.cash < 1e-6
+    assert [(e["event_type"], e["rule"], e["symbol"]) for e in events] == [("clip", "cash_floor", "A"),
+                                                                          ("clip", "cash_floor", "B")]
+    d = json.loads(events[0]["detail"])
+    assert d["requested_qty"] == 50 and d["factor"] == pytest.approx(k) and d["buy_cost"] == pytest.approx(11_005.5)
+    assert events[0]["applied_weight"] == pytest.approx(0.5 * k)
+    # without the floor the same fill goes below zero cash
+    assert L.fill(a, orders, opens)[0].cash == pytest.approx(10_000 - 11_005.5)
+
+
+def test_sells_fill_first_and_fund_the_buys():
+    a = acct(0, B=100)                                      # pv 10000 at 100
+    orders = L.plan_orders(a, {"A": 0.5, "B": 0.5}, {"A": 100.0, "B": 100.0})
+    assert legs(orders) == [("A", "buy", 50.0), ("B", "sell", 50.0)]   # buy listed first
+    opens = {"A": 100.0, "B": 102.0}                        # sell 50 * 101.949 = 5097.45 > buy 5002.5
+    plan, events, a2, fills = floor_fill(a, orders, opens)
+    assert [i for i, _ in plan] == [1, 0] and events == []   # sell first, nothing scaled
+    assert [(f.symbol, f.side, f.qty) for f in fills] == [("B", "sell", 50.0), ("A", "buy", 50.0)]
+    assert a2.cash == pytest.approx(5_097.45 - 5_002.5)
+
+
+def test_sells_short_of_the_buys_scale_only_the_buys():
+    a = acct(0, B=100)
+    orders = L.plan_orders(a, {"A": 0.5, "B": 0.5}, {"A": 100.0, "B": 100.0})
+    plan, events, a2, fills = floor_fill(a, orders, {"A": 100.0, "B": 100.0})
+    assert fills[0].qty == 50.0 and fills[1].qty == pytest.approx(50 * 4_997.5 / 5_002.5, abs=1e-8)
+    assert [e["symbol"] for e in events] == ["A"] and 0 <= a2.cash < 1e-6
+
+
+def test_no_cash_means_no_buys():
+    a = acct(-5.0, A=10)
+    plan, events = L.cash_floor(a, [Order("B", "buy", 3.0)], {"B": 10.0})
+    assert plan == [(0, None)] and json.loads(events[0]["detail"])["applied_qty"] == 0
+
+
+def test_crypto_fee_is_included_in_the_floor():
+    a = acct(1_000)
+    orders = [Order("BTC/USD", "buy", 10.0)]                # 10 * 100.05 * 1.0025 = 1003.00125
+    plan, events, a2, fills = floor_fill(a, orders, {"BTC/USD": 100.0}, fee_rate=L.CRYPTO_FEE)
+    assert fills[0].qty == pytest.approx(10 * 1_000 / 1_003.00125, abs=1e-8)
+    assert 0 <= a2.cash < 1e-6 and len(events) == 1
+
+
+def test_affordable_buys_untouched():
+    a = acct(10_000)
+    orders = L.plan_orders(a, {"A": 0.5}, {"A": 100.0})
+    plan, events = L.cash_floor(a, orders, {"A": 100.0})
+    assert plan == [(0, orders[0])] and events == []
+
+
+# ---------------------------------------------------------------------------
 # Accounting identity
 # ---------------------------------------------------------------------------
 
+@pytest.mark.parametrize("floor", [False, True])
 @pytest.mark.parametrize("seed", range(5))
-def test_equity_change_equals_pnl_minus_costs_to_the_cent(seed):
+def test_equity_change_equals_pnl_minus_costs_to_the_cent(seed, floor):
     rng = random.Random(seed)
     syms = ["A", "B", "C", "D"]
     close = {s: rng.uniform(5, 500) for s in syms}
@@ -255,7 +332,12 @@ def test_equity_change_equals_pnl_minus_costs_to_the_cent(seed):
         opens = {s: c * math.exp(rng.gauss(0, 0.02)) for s, c in close.items()}
         close = {s: o * math.exp(rng.gauss(0, 0.02)) for s, o in opens.items()}
         fee_rate = rng.choice((0.0, L.CRYPTO_FEE))
+        if floor:
+            plan, _ = L.cash_floor(a, orders, opens, fee_rate=fee_rate)
+            orders = [o for _, o in plan if o is not None]
         a, fills = L.fill(a, orders, opens, fee_rate=fee_rate)
+        if floor:
+            assert a.cash >= 0
         a, borrow, interest = L.accrue(a, day)
         a, mk = L.mark(a, close, day)
         pnl = math.fsum([prev_qty[s] * (close[s] - prev_close[s]) for s in syms]
@@ -269,13 +351,18 @@ def test_equity_change_equals_pnl_minus_costs_to_the_cent(seed):
         totals["interest"] += interest
         totals["n_fills"] += len(fills)
         # next decision: random targets, gross up to 1.6, so cash goes negative and shorts appear
-        targets = {s: rng.uniform(-0.4, 0.6) for s in rng.sample(syms, rng.randint(0, 4))}
+        lo = 0.0 if floor else -0.4                          # floored agents are long only
+        targets = {s: rng.uniform(lo, 0.6) for s in rng.sample(syms, rng.randint(0, 4))}
         orders = L.plan_orders(a, targets, close)
         if rng.random() < 0.1:
             m_orders, _ = L.margin_orders(a, mk, close)
             orders = orders or m_orders
     # the test exercised every cost
-    assert totals["n_fills"] > 50 and all(totals[k] > 0 for k in ("slip", "fee", "borrow", "interest"))
+    assert totals["n_fills"] > 50 and totals["slip"] > 0 and totals["fee"] > 0
+    if floor:
+        assert totals["borrow"] == 0 and totals["interest"] == 0      # never short, never below zero cash
+    else:
+        assert totals["borrow"] > 0 and totals["interest"] > 0
 
 
 # ---------------------------------------------------------------------------
@@ -290,7 +377,7 @@ def test_ledger_core_imports_nothing_external():
             imported |= {a.name for a in node.names}
         elif isinstance(node, ast.ImportFrom):
             imported.add(node.module)
-    assert imported <= {"__future__", "math", "dataclasses", "datetime", "decimal", "types", "typing",
+    assert imported <= {"__future__", "json", "math", "dataclasses", "datetime", "decimal", "types", "typing",
                         "execution.risk"}
 
 

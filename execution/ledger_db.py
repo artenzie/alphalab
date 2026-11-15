@@ -32,6 +32,13 @@ Modes:
 Crypto (C0, C1) needs an intraday price after the 00:15Z decision, which isn't
 stored yet: settle_day raises PriceNotAvailable for crypto agents.
 
+Cash floor (rule 12): for agents with ledger.has_cash_floor, the pending
+orders go through ledger.cash_floor before filling: sells first, buys scaled
+pro rata so cash can't end below 0. Each scaled buy gets a 'cash_floor'
+risk_events row (with its order's decision_id); its fill row has the scaled
+qty and the event id in detail, or is 'cancelled' if scaled to nothing. The
+orders rows keep the quantities as placed (append-only).
+
 Accounts are rebuilt from the last equity row and its positions rows; with no
 rows the agent starts with START_CASH. Corrections (corrects_id) aren't
 written by this module; when reading, the newest row per day and symbol wins.
@@ -72,6 +79,7 @@ class DayResult:
     mark: L.Mark | None = None
     borrow: float = 0.0
     interest: float = 0.0
+    floor_events: tuple[dict, ...] = ()   # rule 12 clips
 
 
 @dataclass(frozen=True)
@@ -176,11 +184,12 @@ def write_orders(conn: sqlite3.Connection, agent_id: str, asset_class: str, orde
     return ids
 
 
-def _fill_row(order_id: int, f: L.Fill, filled_at: str) -> dict:
+def _fill_row(order_id: int, f: L.Fill, filled_at: str, extra: Mapping[str, Any] | None = None) -> dict:
     return {"order_id": order_id, "status": "filled", "filled_at": filled_at, "qty": f.qty,
             "reference_price": f.reference_price, "slippage_bps": f.slippage_bps,
             "fill_price": f.fill_price, "fee_usd": f.fee_usd,
-            "detail": json.dumps({"origin": f.origin, "slippage_usd": f.slippage_usd}, sort_keys=True)}
+            "detail": json.dumps({"origin": f.origin, "slippage_usd": f.slippage_usd, **(extra or {})},
+                                 sort_keys=True)}
 
 
 def _begin(conn: sqlite3.Connection) -> None:
@@ -258,13 +267,32 @@ def settle_day(conn: sqlite3.Connection, agent_id: str, day: date, now: datetime
         opens = {s: bars[s][o_key] for s in needed}
         closes = {s: bars[s][c_key] for s in needed}
 
-        account, fs = L.fill(account, orders, opens)
-        fills_out += [(r["order_id"], f) for r, f in zip(pending, fs)]
+        # Rule 12: long-only 100%-gross agents fill sells first and never go below zero cash.
+        if L.has_cash_floor(agent_id):
+            plan, floor_events = L.cash_floor(account, orders, opens)
+        else:
+            plan, floor_events = list(enumerate(orders)), []
+        scaled = [i for i, _ in plan if orders[i].side == "buy"] if floor_events else []
+        event_of = dict(zip(scaled, floor_events))           # pending index -> its cash_floor event
+        to_fill = [(i, o) for i, o in plan if o is not None]
+        account, fs = L.fill(account, [o for _, o in to_fill], opens)
+        filled = [(i, f) for (i, _), f in zip(to_fill, fs)]
         account, borrow, interest = L.accrue(account, day)
         account, mk = L.mark(account, closes, day)
 
-        for oid, f in fills_out:
+        event_id = {i: write_risk_events(conn, agent_id, [e], sess.open, pending[i]["decision_id"])[0]
+                    for i, e in event_of.items()}
+        for i, o in plan:
+            if o is None:
+                _insert(conn, "fills", {"order_id": pending[i]["order_id"], "status": "cancelled",
+                                        "filled_at": open_ts, "detail": json.dumps(
+                                            {"reason": "cash_floor", "risk_event_id": event_id[i]}, sort_keys=True)})
+        for oid, f in fills_out:                             # delisting fills
             _insert(conn, "fills", _fill_row(oid, f, open_ts))
+        for i, f in filled:
+            extra = ({"risk_event_id": event_id[i], "requested_qty": pending[i]["qty"]} if i in event_id else None)
+            _insert(conn, "fills", _fill_row(pending[i]["order_id"], f, open_ts, extra))
+        fills_out += [(pending[i]["order_id"], f) for i, f in filled]
         for s, p in sorted(account.positions.items()):
             _insert(conn, "positions", {
                 "agent_id": agent_id, "as_of_date": day.isoformat(), "symbol": s, "asset_class": "us_equity",
@@ -279,7 +307,8 @@ def settle_day(conn: sqlite3.Connection, agent_id: str, day: date, now: datetime
     except BaseException:
         conn.rollback()
         raise
-    return DayResult("settled", tuple(f for _, f in fills_out), tuple(cancelled), mk, borrow, interest)
+    return DayResult("settled", tuple(f for _, f in fills_out), tuple(cancelled), mk, borrow, interest,
+                     tuple(floor_events))
 
 
 # ---------------------------------------------------------------------------

@@ -30,6 +30,10 @@ Rules, as written in protocol §7:
   9. delisting_orders closes a position at its last traded price (slippage
      applies, as on every fill; the $100 minimum does not, so nothing is left
      without a price).
+ 12. cash_floor (agents with has_cash_floor: long only, 100% gross limit)
+     puts the day's sells first and scales all buys down pro rata so the fills
+     never take cash below 0. Each scaled buy is a 'cash_floor' risk event.
+     Scaled buys are filled even under $100 (the minimum is a decision-time rule).
 
 Money is kept as unrounded floats; the accounting identity (change in equity
 = price P&L - slippage - fees - borrow - interest) holds to well under a cent.
@@ -37,6 +41,7 @@ Money is kept as unrounded floats; the accounting identity (change in equity
 
 from __future__ import annotations
 
+import json
 import math
 from dataclasses import dataclass, field, replace
 from datetime import date
@@ -44,7 +49,7 @@ from decimal import ROUND_DOWN, Decimal
 from types import MappingProxyType
 from typing import Mapping
 
-from execution.risk import margin_check
+from execution.risk import TOL, margin_check, profile
 
 START_CASH = 100_000.0
 SLIPPAGE_BPS = 5.0
@@ -55,6 +60,7 @@ DAY_COUNT = 360
 CRYPTO_FEE = 0.0025        # §13: Alpaca tier-1 taker fee
 SHARE_DP = 9               # Alpaca fractional precision
 EPS_USD = 1e-9             # float noise allowed in the $100 test
+FLOOR_HAIRCUT = 1e-12      # scale buys a hair under exact, so float noise can't end below $0
 
 ORIGINS = ("decision", "margin", "delisting")
 
@@ -227,6 +233,49 @@ def delisting_orders(account: Account, symbol: str, last_price: float) -> list[O
         return []
     price = _price({symbol: last_price}, symbol)
     return [Order(symbol, _side(-qty), abs(qty), origin="delisting", target_weight=0.0, decision_close=price)]
+
+
+def has_cash_floor(agent_id: int | str) -> bool:
+    """Rule 12 applies: the agent can't short and its gross limit is 100% (1, 2, 3, 5, 7, 14, C0, C1)."""
+    p = profile(agent_id)
+    return not p.shorts and p.max_gross <= 1 + TOL
+
+
+def cash_floor(account: Account, orders: list[Order], ref_prices: Mapping[str, float],
+               slippage_bps: float = SLIPPAGE_BPS, fee_rate: float = 0.0
+               ) -> tuple[list[tuple[int, Order | None]], list[dict]]:
+    """Rule 12: sells first, then buys scaled pro rata so cash can't end below 0.
+
+    Returns (plan, events). plan is [(index into orders, order to fill or None)]
+    in fill order: sells as given, then buys, each scaled by the same factor k
+    (shares rounded down; None when scaled to nothing). events has one
+    risk_events-shaped dict per scaled buy (empty when nothing is scaled).
+    applied_weight is the target weight x k, an approximation; the exact
+    quantities are in detail.
+    """
+    bps = slippage_bps / 10_000
+    sells = [(i, o) for i, o in enumerate(orders) if o.side == "sell"]
+    buys = [(i, o) for i, o in enumerate(orders) if o.side == "buy"]
+    cash_after_sells = account.cash + math.fsum(
+        o.qty * _price(ref_prices, o.symbol) * (1 - bps) * (1 - fee_rate) for _, o in sells)
+    cost = math.fsum(o.qty * _price(ref_prices, o.symbol) * (1 + bps) * (1 + fee_rate) for _, o in buys)
+    plan: list[tuple[int, Order | None]] = list(sells)
+    if not buys or cost <= cash_after_sells:
+        return plan + list(buys), []
+    k = max(0.0, cash_after_sells) / cost * (1 - FLOOR_HAIRCUT)
+    events = []
+    for i, o in buys:
+        q = round_long(o.qty * k)
+        plan.append((i, replace(o, qty=q) if q > 0 else None))
+        events.append({
+            "event_type": "clip", "rule": "cash_floor", "symbol": o.symbol,
+            "requested_weight": o.target_weight,
+            "applied_weight": None if o.target_weight is None else o.target_weight * k,
+            "detail": json.dumps({"requested_qty": o.qty, "applied_qty": q, "factor": k,
+                                  "cash_after_sells": cash_after_sells, "buy_cost": cost,
+                                  "applied_weight_is": "target_weight x factor (approximate)"},
+                                 sort_keys=True)})
+    return plan, events
 
 
 # ---------------------------------------------------------------------------
