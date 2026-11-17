@@ -100,8 +100,17 @@ def populated(conn):
            VALUES (?, '2026-11-16', '2026-11-16T14:30:00.000Z', '2026-11-16T21:00:00.000Z')""",
         (fetch,),
     )
+    add_fill_bar(conn)
     conn.commit()
     return conn
+
+
+def add_fill_bar(conn, bar_ts="2026-11-17T00:16:00.000Z", fetched_at="2026-11-17T00:20:00.000Z",
+                 window_start="2026-11-17T00:15:00.000Z"):
+    return conn.execute(
+        """INSERT INTO crypto_fill_bars (symbol, decision_date, window_start, bar_ts, open, high, low, close,
+               volume, feed, fetched_at) VALUES ('BTC/USD', '2026-11-16', ?, ?, 65000, 65010, 64990, 65005,
+               1.5, 'crypto', ?)""", (window_start, bar_ts, fetched_at)).lastrowid
 
 
 # --- builds -----------------------------------------------------------------
@@ -323,3 +332,33 @@ def test_reasoning_tokens_accepted(conn, tokens_out, reasoning):
 def test_reasoning_tokens_rejected(conn, tokens_out, reasoning):
     with pytest.raises(sqlite3.IntegrityError):
         _decision_with(conn, tokens_out, reasoning)
+
+
+# --- crypto_fill_bars (§7 rule 4, v1.12) ---------------------------------------
+
+@pytest.mark.parametrize("bar_ts, fetched_at", [
+    ("2026-11-17T00:14:00.000Z", "2026-11-17T00:20:00.000Z"),   # before the decision window
+    ("2026-11-17T01:15:00.000Z", "2026-11-17T01:20:00.000Z"),   # after the 60-minute window
+    ("2026-11-17T00:16:00.000Z", "2026-11-17T00:16:59.999Z"),   # fetched before the minute ended
+])
+def test_fill_bars_outside_the_window_or_unclosed_are_rejected(conn, bar_ts, fetched_at):
+    with pytest.raises(sqlite3.IntegrityError, match="CHECK"):
+        add_fill_bar(conn, bar_ts=bar_ts, fetched_at=fetched_at)
+
+
+def test_fill_bar_window_edges_are_accepted(conn):
+    add_fill_bar(conn, bar_ts="2026-11-17T00:15:00.000Z", fetched_at="2026-11-17T00:16:00.000Z")
+    add_fill_bar(conn, bar_ts="2026-11-17T01:14:00.000Z", fetched_at="2026-11-17T01:15:00.000Z")
+
+
+def test_init_db_adds_fill_bars_to_an_old_database(tmp_path):
+    path = tmp_path / "old.db"
+    c = db.init_db(path)
+    for trig in ("crypto_fill_bars_no_update", "crypto_fill_bars_no_delete"):
+        c.execute(f"DROP TRIGGER {trig}")
+    c.execute("DROP TABLE crypto_fill_bars")
+    c.commit()
+    c.close()
+    c = db.init_db(path)
+    assert c.execute("SELECT COUNT(*) FROM crypto_fill_bars").fetchone()[0] == 0
+    c.close()

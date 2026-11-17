@@ -316,6 +316,35 @@ CREATE TABLE IF NOT EXISTS market_sessions (
 );
 
 -- ---------------------------------------------------------------------------
+-- crypto_fill_bars: closed 1-minute bars after each crypto decision (§7 rule 4, v1.12)
+-- ---------------------------------------------------------------------------
+-- The crypto fill price source: the closed minute bars in [window_start,
+-- window_start + 60 min), window_start = 00:15Z after the daily bar of
+-- decision_date closes. Versioned like prices (a re-fetch inserts a new
+-- version only when a bar differs). No snapshot ever reads this table.
+CREATE TABLE IF NOT EXISTS crypto_fill_bars (
+    fill_bar_id    INTEGER PRIMARY KEY,
+    symbol         TEXT NOT NULL,                   -- 'BTC/USD'
+    decision_date  TEXT NOT NULL CHECK (decision_date GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]'),
+    window_start   TEXT NOT NULL CHECK (window_start GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9]Z'),
+    bar_ts         TEXT NOT NULL CHECK (bar_ts GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9]Z'),   -- minute start, UTC
+    open           REAL NOT NULL CHECK (open > 0),
+    high           REAL NOT NULL CHECK (high > 0),
+    low            REAL NOT NULL CHECK (low > 0),
+    close          REAL NOT NULL CHECK (close > 0),
+    volume         REAL NOT NULL CHECK (volume >= 0),
+    vwap           REAL,
+    trade_count    INTEGER,
+    feed           TEXT NOT NULL,
+    fetched_at     TEXT NOT NULL CHECK (fetched_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9]Z'),
+    CHECK (bar_ts >= window_start),
+    CHECK (bar_ts < strftime('%Y-%m-%dT%H:%M:%fZ', window_start, '+60 minutes')),
+    CHECK (fetched_at >= strftime('%Y-%m-%dT%H:%M:%fZ', bar_ts, '+1 minute')),   -- closed when fetched
+    UNIQUE (symbol, bar_ts, fetched_at)
+);
+CREATE INDEX IF NOT EXISTS ix_crypto_fill_bars ON crypto_fill_bars (symbol, bar_ts);
+
+-- ---------------------------------------------------------------------------
 -- Integrity triggers
 -- ---------------------------------------------------------------------------
 
@@ -361,3 +390,5 @@ CREATE TRIGGER IF NOT EXISTS calendar_fetches_no_update BEFORE UPDATE ON calenda
 CREATE TRIGGER IF NOT EXISTS calendar_fetches_no_delete BEFORE DELETE ON calendar_fetches BEGIN SELECT RAISE(ABORT, 'calendar_fetches is append-only (CLAUDE.md rule 2)'); END;
 CREATE TRIGGER IF NOT EXISTS market_sessions_no_update  BEFORE UPDATE ON market_sessions  BEGIN SELECT RAISE(ABORT, 'market_sessions is append-only (CLAUDE.md rule 2)'); END;
 CREATE TRIGGER IF NOT EXISTS market_sessions_no_delete  BEFORE DELETE ON market_sessions  BEGIN SELECT RAISE(ABORT, 'market_sessions is append-only (CLAUDE.md rule 2)'); END;
+CREATE TRIGGER IF NOT EXISTS crypto_fill_bars_no_update BEFORE UPDATE ON crypto_fill_bars BEGIN SELECT RAISE(ABORT, 'crypto_fill_bars is append-only (CLAUDE.md rule 2)'); END;
+CREATE TRIGGER IF NOT EXISTS crypto_fill_bars_no_delete BEFORE DELETE ON crypto_fill_bars BEGIN SELECT RAISE(ABORT, 'crypto_fill_bars is append-only (CLAUDE.md rule 2)'); END;

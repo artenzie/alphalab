@@ -15,6 +15,7 @@ AlphaLab is a research project that runs AI trading agents against Alpaca **pape
 | `research/universe/` | Frozen universe (`universe.csv`) + holdings evidence |
 | `data/db.py` | SQLite schema setup (`schema.sql`) and connections; append-only triggers |
 | `data/ingest.py` | Daily Alpaca bars into versioned `prices` rows; never stores unclosed bars |
+| `data/fill_prices.py` | Crypto 1-minute fill bars (00:15Z–01:15Z after each decision) into `crypto_fill_bars`; closed bars only, never in a snapshot |
 | `data/calendar.py` | NYSE trading days, closes, daily run times (all UTC) |
 | `data/checks.py` | Data checks on stored bars, run after every ingest |
 | `data/snapshot.py` | Point-in-time daily snapshot: the only data an agent sees |
