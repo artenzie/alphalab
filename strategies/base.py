@@ -83,12 +83,44 @@ class Portfolio:
 
 
 @dataclass(frozen=True)
+class PastDecision:
+    """One of an AI agent's own earlier decisions, as shown back to it (protocol §4)."""
+    decision_date: date
+    status: str                                  # 'ok', 'invalid', 'unavailable', 'capped'
+    targets: Mapping[str, float] | None          # None = hold
+    reasons: Mapping[str, str] = field(default_factory=dict)
+    reasoning: str = ""
+
+    def __post_init__(self) -> None:
+        if self.targets is not None:
+            object.__setattr__(self, "targets", MappingProxyType(dict(self.targets)))
+        object.__setattr__(self, "reasons", MappingProxyType(dict(self.reasons)))
+
+
+@dataclass(frozen=True)
+class AgentMemory:
+    """The §4 AI inputs a Portfolio doesn't carry, read from the log by the runner."""
+    starting_value: float
+    avg_cost: Mapping[str, float] = field(default_factory=dict)
+    last_decisions: tuple[PastDecision, ...] = ()
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "avg_cost", MappingProxyType(dict(self.avg_cost)))
+        object.__setattr__(self, "last_decisions", tuple(self.last_decisions))
+
+
+@dataclass(frozen=True)
 class Context:
-    """Calendar facts for the decision, computed by the runner (build_context)."""
+    """Calendar facts for the decision, computed by the runner (build_context).
+
+    memory is set by the runner for AI agents only (dataclasses.replace);
+    rule-based agents ignore it.
+    """
     decision_date: date
     is_first_day_of_run: bool
     is_first_session_of_week: bool
     is_first_session_of_month: bool
+    memory: AgentMemory | None = None
 
 
 def build_context(decision_date: date, run_sessions: Sequence[date]) -> Context:

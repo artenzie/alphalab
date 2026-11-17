@@ -26,7 +26,9 @@ AlphaLab is a research project that runs AI trading agents against Alpaca **pape
 | `execution/ledger_db.py` | Ledger on the append-only tables: `settle_day` (fill at open, accrue, mark), `place_orders` |
 | `scripts/` | One-off tools: build_universe, OpenRouter model checks, backtest_indicators/risk/ledger |
 | `tests/` | pytest suite |
-| `agents/prompts/`, `analysis/`, `dashboard/` | Not built yet |
+| `agents/harness.py` | `AIAgent`: same `decide` interface; prompt, JSON validation, §8 retries, call record per attempt |
+| `agents/llm.py` | `LLMClient` interface, `FakeClient` for tests |
+| `agents/prompts/`, `analysis/`, `dashboard/` | Not built yet (prompts Sat 5 Dec) |
 
 ## Working here
 
