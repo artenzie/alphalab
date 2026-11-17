@@ -193,11 +193,9 @@ def test_orders_created_after_the_open_wait_for_the_next_day(conn):
     assert settle(conn, "4", TUE).fills == ()
 
 
-def test_not_a_trading_day_and_crypto_refused(conn):
+def test_not_a_trading_day_refused(conn):
     with pytest.raises(L.LedgerError):
-        settle(conn, "4", SAT)
-    with pytest.raises(LD.PriceNotAvailable):
-        settle(conn, "C1", MON)
+        settle(conn, "4", SAT)          # crypto settles every day: tests/test_ledger_crypto.py
 
 
 # ---------------------------------------------------------------------------

@@ -29,8 +29,15 @@ Modes:
             ledger for a manual correction (rule 11) rather than sizing across it.
   backtest  split-adjusted open/close, matching backtest snapshots; no split guard.
 
-Crypto (C0, C1) needs an intraday price after the 00:15Z decision, which isn't
-stored yet: settle_day raises PriceNotAvailable for crypto agents.
+Crypto (C0, C1; §7 rule 4, v1.12). Every calendar day is a settle day: day
+D+1 fills decision D's orders and marks at D+1's daily close (00:00Z on D+2).
+Pending orders are those created before that close. They fill at the open of
+the first 1-minute bar (crypto_fill_bars) starting at or after t_ref = the later
+of 00:15Z on D+1 and the orders' created_at, rounded up to the whole minute,
+so a fill is never earlier than its order; plus 5 bps and the 0.25% fee
+(ledger.CRYPTO_FEE), the cash floor included. The bar must have closed by
+`now` and been fetched by `now` (rule 11); filled_at is its bar_ts and the
+fill detail names its fill_bar_id. No split guard or delisting for crypto.
 
 Cash floor (rule 12): for agents with ledger.has_cash_floor, the pending
 orders go through ledger.cash_floor before filling: sells first, buys scaled
@@ -50,12 +57,13 @@ import json
 import math
 import sqlite3
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from typing import Any, Mapping
 
 from data import calendar as cal
 from data import db
-from data.ingest import equity_bar_closed
+from data.fill_prices import MINUTE, WINDOW
+from data.ingest import crypto_bar_closed, equity_bar_closed
 from execution import ledger as L
 from execution.ledger import Account, LedgerError, Order, Position
 
@@ -152,6 +160,36 @@ def day_bars(conn: sqlite3.Connection, symbols: list[str], day: date, now: datet
     return {r["symbol"]: r for r in rows}
 
 
+def ceil_minute(ts: datetime) -> datetime:
+    """ts rounded up to the next whole minute (unchanged if already whole)."""
+    floor = ts.replace(second=0, microsecond=0)
+    return floor if floor == ts else floor + MINUTE
+
+
+def fill_bars(conn: sqlite3.Connection, symbols: list[str], t_ref: datetime, now: datetime,
+              window_end: datetime) -> dict[str, sqlite3.Row]:
+    """Per symbol, the first crypto minute bar with t_ref <= bar_ts < window_end, as known at now.
+
+    Only bars whose minute has ended by now (bar_ts + 1 min <= now) and that were
+    fetched at or before now count; of each bar, the latest such version.
+    """
+    out = {}
+    params = {"ref": db.utc_ts(t_ref), "end": db.utc_ts(window_end), "closed_by": db.utc_ts(now - MINUTE),
+              "now": db.utc_ts(now)}
+    for s in symbols:
+        r = conn.execute(
+            """SELECT b.* FROM crypto_fill_bars AS b
+               WHERE b.symbol = :s AND b.bar_ts >= :ref AND b.bar_ts < :end AND b.bar_ts <= :closed_by
+                 AND b.fetched_at <= :now
+                 AND b.fill_bar_id = (SELECT q.fill_bar_id FROM crypto_fill_bars AS q
+                                      WHERE q.symbol = b.symbol AND q.bar_ts = b.bar_ts AND q.fetched_at <= :now
+                                      ORDER BY q.fetched_at DESC, q.fill_bar_id DESC LIMIT 1)
+               ORDER BY b.bar_ts LIMIT 1""", {"s": s, **params}).fetchone()
+        if r is not None:
+            out[s] = r
+    return out
+
+
 # ---------------------------------------------------------------------------
 # Writing helpers
 # ---------------------------------------------------------------------------
@@ -208,13 +246,21 @@ def settle_day(conn: sqlite3.Connection, agent_id: str, day: date, now: datetime
     agent_id = str(agent_id)
     if mode not in MODES:
         raise LedgerError(f"unknown mode {mode!r}")
-    if _asset_class(conn, agent_id) == "crypto":
-        raise PriceNotAvailable("crypto fills need an intraday price after the decision; source not built yet")
-    sess = cal.session(day, conn, trading)          # before the transaction: may refresh the cache
-    if sess is None:
-        raise LedgerError(f"{day} is not a trading day")
-    open_ts, close_ts = db.utc_ts(sess.open), db.utc_ts(sess.close)
+    asset_class = _asset_class(conn, agent_id)
+    crypto = asset_class == "crypto"
     delisted = dict(delisted or {})
+    if crypto:
+        if delisted:
+            raise LedgerError("delisting is an equity rule (§7 rule 9); crypto agents have none")
+        fill_from = cal.crypto_times(day - timedelta(days=1)).decide_at     # 00:15Z on day
+        day_close = cal.crypto_times(day).close                              # 00:00Z on day + 1
+    else:
+        sess = cal.session(day, conn, trading)      # before the transaction: may refresh the cache
+        if sess is None:
+            raise LedgerError(f"{day} is not a trading day")
+        fill_from, day_close = sess.open, sess.close
+    open_ts, close_ts = db.utc_ts(fill_from), db.utc_ts(day_close)
+    fee_rate = L.CRYPTO_FEE if crypto else 0.0
 
     _begin(conn)
     try:
@@ -229,8 +275,12 @@ def settle_day(conn: sqlite3.Connection, agent_id: str, day: date, now: datetime
             return DayResult("already_settled")
 
         account = load_account(conn, agent_id, before=day)
-        pending = pending_orders(conn, agent_id, created_by=open_ts)
-        fills_out: list[tuple[int, L.Fill]] = []
+        # Equity: orders written by the open. Crypto: orders written before the day's close
+        # (the decision on day itself is written after it).
+        pending = pending_orders(conn, agent_id, created_by=open_ts if not crypto else None)
+        if crypto:
+            pending = [r for r in pending if r["created_at"] < close_ts]
+        fills_out: list[tuple[int, L.Fill, str]] = []        # (order_id, fill, filled_at)
 
         # Rule 9: delisted stocks close at their last price; their pending orders are cancelled.
         cancelled = []
@@ -243,71 +293,93 @@ def settle_day(conn: sqlite3.Connection, agent_id: str, day: date, now: datetime
         for sym, last in sorted(delisted.items()):
             d_orders = L.delisting_orders(account, sym, last)
             if d_orders:
-                ids = write_orders(conn, agent_id, "us_equity", d_orders, sess.open)
+                ids = write_orders(conn, agent_id, asset_class, d_orders, fill_from)
                 account, fs = L.fill(account, d_orders, {sym: last})
-                fills_out += list(zip(ids, fs))
+                fills_out += [(i, f, open_ts) for i, f in zip(ids, fs)]
 
         # Rule 11: every bar needed must be stored, fetched by now, and closed.
         orders = [Order(r["symbol"], r["side"], r["qty"], r["origin"], r["target_weight"]) for r in pending]
         needed = sorted(set(account.positions) | {o.symbol for o in orders})
         bars = day_bars(conn, needed, day, now)
-        missing = [s for s in needed if s not in bars
-                   or not equity_bar_closed(cal._parse_ts(bars[s]["bar_ts"]), now,
-                                            lambda d: sess.close if d == day else None)]
+        if crypto:
+            is_closed = lambda r: crypto_bar_closed(cal._parse_ts(r["bar_ts"]), now)  # noqa: E731
+        else:
+            is_closed = lambda r: equity_bar_closed(  # noqa: E731
+                cal._parse_ts(r["bar_ts"]), now, lambda d: sess.close if d == day else None)
+        missing = [s for s in needed if s not in bars or not is_closed(bars[s])]
         if missing:
             raise PriceNotAvailable(f"{day}: no closed, stored bar yet for {', '.join(missing)} "
                                     f"(as of {db.utc_ts(now)})")
-        if mode == "live" and account.eod_date is not None:
+        if mode == "live" and not crypto and account.eod_date is not None:
             prev = day_bars(conn, needed, account.eod_date, now)
             split = [s for s, r in prev.items() if abs(r["adj_close"] / r["close"] - 1) > SPLIT_TOL]
             if split:
                 raise SplitDetected(f"split in {', '.join(split)} between {account.eod_date} and {day}: "
                                     f"correct the positions by hand before settling")
         o_key, c_key = ("open", "close") if mode == "live" else ("adj_open", "adj_close")
-        opens = {s: bars[s][o_key] for s in needed}
         closes = {s: bars[s][c_key] for s in needed}
+        filled_at = {s: open_ts for s in needed}
+        bar_id: dict[str, int] = {}
+        if crypto:
+            # §7 rule 4 (v1.12): the first closed minute bar at or after the decision time.
+            t_ref = ceil_minute(max([fill_from] + [cal._parse_ts(r["created_at"]) for r in pending]))
+            symbols = sorted({o.symbol for o in orders})
+            fb = fill_bars(conn, symbols, t_ref, now, fill_from + WINDOW)
+            gone = [s for s in symbols if s not in fb]
+            if gone:
+                raise PriceNotAvailable(f"{day}: no closed, stored minute bar at or after {db.utc_ts(t_ref)} "
+                                        f"for {', '.join(gone)} (as of {db.utc_ts(now)})")
+            opens = {s: fb[s]["open"] for s in symbols}
+            filled_at.update({s: fb[s]["bar_ts"] for s in symbols})
+            bar_id = {s: fb[s]["fill_bar_id"] for s in symbols}
+            cancel_ts = db.utc_ts(t_ref)
+        else:
+            opens = {s: bars[s][o_key] for s in needed}
+            cancel_ts = open_ts
 
         # Rule 12: long-only 100%-gross agents fill sells first and never go below zero cash.
         if L.has_cash_floor(agent_id):
-            plan, floor_events = L.cash_floor(account, orders, opens)
+            plan, floor_events = L.cash_floor(account, orders, opens, fee_rate=fee_rate)
         else:
             plan, floor_events = list(enumerate(orders)), []
         scaled = [i for i, _ in plan if orders[i].side == "buy"] if floor_events else []
         event_of = dict(zip(scaled, floor_events))           # pending index -> its cash_floor event
         to_fill = [(i, o) for i, o in plan if o is not None]
-        account, fs = L.fill(account, [o for _, o in to_fill], opens)
+        account, fs = L.fill(account, [o for _, o in to_fill], opens, fee_rate=fee_rate)
         filled = [(i, f) for (i, _), f in zip(to_fill, fs)]
         account, borrow, interest = L.accrue(account, day)
         account, mk = L.mark(account, closes, day)
 
-        event_id = {i: write_risk_events(conn, agent_id, [e], sess.open, pending[i]["decision_id"])[0]
+        event_id = {i: write_risk_events(conn, agent_id, [e], fill_from, pending[i]["decision_id"])[0]
                     for i, e in event_of.items()}
         for i, o in plan:
             if o is None:
                 _insert(conn, "fills", {"order_id": pending[i]["order_id"], "status": "cancelled",
-                                        "filled_at": open_ts, "detail": json.dumps(
+                                        "filled_at": cancel_ts, "detail": json.dumps(
                                             {"reason": "cash_floor", "risk_event_id": event_id[i]}, sort_keys=True)})
-        for oid, f in fills_out:                             # delisting fills
-            _insert(conn, "fills", _fill_row(oid, f, open_ts))
+        for oid, f, at in fills_out:                         # delisting fills
+            _insert(conn, "fills", _fill_row(oid, f, at))
         for i, f in filled:
-            extra = ({"risk_event_id": event_id[i], "requested_qty": pending[i]["qty"]} if i in event_id else None)
-            _insert(conn, "fills", _fill_row(pending[i]["order_id"], f, open_ts, extra))
-        fills_out += [(pending[i]["order_id"], f) for i, f in filled]
+            extra = ({"risk_event_id": event_id[i], "requested_qty": pending[i]["qty"]} if i in event_id else {})
+            if f.symbol in bar_id:
+                extra["fill_bar_id"] = bar_id[f.symbol]
+            _insert(conn, "fills", _fill_row(pending[i]["order_id"], f, filled_at[f.symbol], extra or None))
+        fills_out += [(pending[i]["order_id"], f, filled_at[f.symbol]) for i, f in filled]
         for s, p in sorted(account.positions.items()):
             _insert(conn, "positions", {
-                "agent_id": agent_id, "as_of_date": day.isoformat(), "symbol": s, "asset_class": "us_equity",
+                "agent_id": agent_id, "as_of_date": day.isoformat(), "symbol": s, "asset_class": asset_class,
                 "qty": p.qty, "avg_cost": p.avg_cost, "mark_price": closes[s], "market_value": mk.values[s],
                 "unrealised_pnl": (closes[s] - p.avg_cost) * p.qty})
         _insert(conn, "equity", {
             "agent_id": agent_id, "as_of_date": day.isoformat(), "cash": mk.cash, "long_value": mk.long_value,
             "short_value": mk.short_value, "equity": mk.equity, "gross_exposure": mk.gross_exposure,
             "borrow_fee_usd": borrow, "margin_interest_usd": interest,
-            "trading_fees_usd": math.fsum(f.fee_usd for _, f in fills_out)})
+            "trading_fees_usd": math.fsum(f.fee_usd for _, f, _ in fills_out)})
         conn.commit()
     except BaseException:
         conn.rollback()
         raise
-    return DayResult("settled", tuple(f for _, f in fills_out), tuple(cancelled), mk, borrow, interest,
+    return DayResult("settled", tuple(f for _, f, _ in fills_out), tuple(cancelled), mk, borrow, interest,
                      tuple(floor_events))
 
 
