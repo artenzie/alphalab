@@ -21,7 +21,7 @@ AlphaLab is a research project that runs AI trading agents against Alpaca **pape
 | `data/snapshot.py` | Point-in-time daily snapshot: the only data an agent sees |
 | `strategies/base.py` | Agent interface: `decide(snapshot, portfolio, context) -> Decision` |
 | `strategies/registry.py` | Agent id -> decide function |
-| `strategies/benchmark.py` … | Agents 1-6: benchmark, equal_weight, momentum, mean_reversion, trend, long_short |
+| `strategies/benchmark.py` … | Agents 1-6: benchmark, equal_weight, momentum, mean_reversion, trend, long_short; `bitcoin.py` is C0 (§13) |
 | `execution/risk.py` | §6 risk checks (`apply_risk`, `margin_check`), pure functions |
 | `execution/ledger.py` | §7 ledger accounting core (orders, fills, accruals, marks, margin, delisting), pure functions |
 | `execution/ledger_db.py` | Ledger on the append-only tables: `settle_day` (fill at open, or crypto at the first 1-min bar after the decision; accrue, mark), `place_orders` |

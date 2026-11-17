@@ -301,8 +301,47 @@ def test_snapshot_has_no_connection():
 def test_registry():
     assert sorted(registry.AGENTS) == [1, 2, 3, 4, 5, 6]
     assert registry.AGENTS[1] is benchmark.decide and registry.AGENTS[2] is equal_weight.decide
-    assert len(AGENT_MODULES) == len(registry.AGENTS)
+    assert len(AGENT_MODULES) == len(registry.AGENTS) + len(registry.CRYPTO_AGENTS)
     with pytest.raises(KeyError):
         registry.get_agent(99)
     with pytest.raises(TypeError):
         registry.AGENTS[3] = benchmark.decide
+
+
+# ---------------------------------------------------------------------------
+# C0 · Bitcoin benchmark (§13)
+# ---------------------------------------------------------------------------
+
+from strategies import bitcoin  # noqa: E402
+
+COINS = ["BTC/USD", "DOGE/USD", "ETH/USD", "SOL/USD", "XRP/USD"]
+
+
+def crypto_ctx(d: date, first: bool) -> Context:
+    return Context(d, first, first, first)
+
+
+def test_c0_buys_btc_on_day_one_then_holds():
+    snap = make_snapshot(RUN_START, symbols=COINS)
+    empty = Portfolio(cash=100_000.0, positions={}, value=100_000.0)
+    in_btc = Portfolio(cash=0.0, positions={"BTC/USD": 1.5}, value=100_000.0)
+    d1 = bitcoin.decide(snap, empty, crypto_ctx(RUN_START, True))
+    assert dict(d1.weights) == {"BTC/USD": 1.0}
+    assert dict(bitcoin.decide(snap, in_btc, crypto_ctx(RUN_START, True)).weights) == {"BTC/USD": 1.0}
+    assert bitcoin.decide(snap, in_btc, crypto_ctx(RUN[1], False)).is_hold
+
+
+def test_c0_catches_a_missed_day_one():
+    snap = make_snapshot(RUN[1], symbols=COINS)
+    empty = Portfolio(cash=100_000.0, positions={}, value=100_000.0)
+    in_eth = Portfolio(cash=0.0, positions={"ETH/USD": 30.0}, value=100_000.0)
+    for p in (empty, in_eth):
+        d = bitcoin.decide(snap, p, crypto_ctx(RUN[1], False))
+        assert dict(d.weights) == {"BTC/USD": 1.0} and "missed" in d.reason
+
+
+def test_crypto_registry():
+    assert dict(registry.CRYPTO_AGENTS) == {"C0": bitcoin.decide}
+    assert registry.get_agent("C0") is bitcoin.decide and registry.CRYPTO_NAMES["C0"] == "Bitcoin benchmark"
+    with pytest.raises(KeyError):
+        registry.get_agent("C1")            # an AI agent: agents/harness.py, not the registry
