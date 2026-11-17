@@ -1,6 +1,6 @@
 # Experiment protocol
 
-**Version:** v1.8, Sun 15 Nov 2026 (Gate 1 + crypto timings + day-1 decisions + agent 4/5 clarifications + agent 4 capacity, pro rata clipping + ledger rules + cash floor + dust buys + complete targets)
+**Version:** v1.9, Tue 17 Nov 2026 (Gate 1 + crypto timings + day-1 decisions + agent 4/5 clarifications + agent 4 capacity, pro rata clipping + ledger rules + cash floor + dust buys + complete targets + AI targets stocks only)
 **Next:** final freeze as `protocol-v2.0` on Sun 10 Jan 2027, after the shakedown.
 
 All numbers were approved at the Gate 1 review on Sat 14 Nov 2026. The universe and model lineup were filled in from the Gate 1 scripts the same evening. Everything follows from decisions D1–D9 in `research/decisions.md`.
@@ -112,7 +112,7 @@ All agents output **target weights** (fraction of current portfolio value per sy
 
 On the first day of the run every agent makes its first decision, including weekly and monthly ones.
 
-Agents 3–6 trade only the 22 stocks, never SPY. Ranking ties are broken by symbol name (A before Z), so results are deterministic. A stock whose snapshot field for a rule is missing (too little history) is left out of that rule; agent 4 keeps an open position whose z-score is missing. Agents 2–6 also decide on any day when they hold none of the stocks yet, so a missed first decision is caught the next day.
+Agents 3–6 trade only the 22 stocks, never SPY. AI agents (7–15) also target only the 22 stocks: SPY is in their snapshot as market context, and a target on SPY is invalid output (§8). Ranking ties are broken by symbol name (A before Z), so results are deterministic. A stock whose snapshot field for a rule is missing (too little history) is left out of that rule; agent 4 keeps an open position whose z-score is missing. Agents 2–6 also decide on any day when they hold none of the stocks yet, so a missed first decision is caught the next day.
 
 Agents 8–12 share one prompt template, word for word. Agents 7, 13, 14 and 15 have their own prompts, built from the same template (written together on Sat 5 Dec, stored in `agents/prompts/`).
 
@@ -258,3 +258,4 @@ Reported separately. Never ranked or tested against the equity agents.
 - **v1.7** · Sun 15 Nov 2026 · §7 rule 12: a buy the cash floor scales to under $1 is cancelled instead of filling a few billionths of a share; its `cash_floor` event says so. The cash it would have used stays as cash. Follows the dust-buy note in the 15 Nov log.
 - **v1.8** · Sun 15 Nov 2026 · §7 rule 1: a non-hold decision is the complete target portfolio; a held symbol left out goes to 0 (replaces "a symbol an agent leaves out keeps its shares"). The §6 risk checks therefore see the whole resulting portfolio. Prompted by the first two-year control backtest, where agents 3–6 never sold stocks they dropped (agent 6 reached 2.9× gross, agent 5's buys went unfunded every day).
 - **v1.8 (clerical)** · Sun 15 Nov 2026 · §7 rule 3: a short target within 10⁻⁹ of a whole share is snapped to it before rounding towards zero. Without this, float noise turned an unchanged −10-share target into −9 in about 10% of cases (a spurious resize of agent 4's kept shorts). No number changed.
+- **v1.9** · Tue 17 Nov 2026 · §5: AI agents (7–15) may target only the 22 stocks. SPY stays in their snapshot as market context; a target on SPY is invalid output (§8: one retry with the error shown, then hold). SPY is the benchmark every agent is measured against, not a holding for the agents being compared to it. Written down before the AI harness was coded; no number changed.
