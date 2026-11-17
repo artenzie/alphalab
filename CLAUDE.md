@@ -10,7 +10,7 @@ AlphaLab is a research project that runs AI trading agents against Alpaca **pape
 
 | Path | Purpose |
 |---|---|
-| `research/experiment_protocol.md` | The protocol (currently **v1.11**); § numbers in code refer to it |
+| `research/experiment_protocol.md` | The protocol (currently **v1.12**); § numbers in code refer to it |
 | `research/decisions.md`, `research/logs/` | Design decisions (D1, D2, …) and dated learning logs |
 | `research/universe/` | Frozen universe (`universe.csv`) + holdings evidence |
 | `data/db.py` | SQLite schema setup (`schema.sql`) and connections; append-only triggers |
