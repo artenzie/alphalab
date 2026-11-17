@@ -366,3 +366,51 @@ def test_agents_without_the_floor_still_borrow_and_pay_interest(conn):
     assert count(conn, "risk_events") == 0
     add(conn, "A", WED, 110.0)
     assert settle(conn, "4", WED).interest == pytest.approx(-res.mark.cash * 0.065 / 360)
+
+
+# ---------------------------------------------------------------------------
+# §7 rule 1 (v1.8) through risk -> orders -> fills: the decision is the whole book
+# ---------------------------------------------------------------------------
+
+def _decide_risk_place(conn, agent, d, closes, targets):
+    """What the runner does: apply_risk on the agent's current weights, then place_orders."""
+    from execution.risk import apply_risk
+    from strategies.base import Decision
+    acct = LD.load_account(conn, agent, as_of=d)
+    pv = acct.value(closes)
+    current = {s: acct.shares(s) * closes[s] / pv for s in acct.positions}
+    weights, events = apply_risk(agent, Decision(targets, "test"), {s: True for s in closes}, current)
+    place(conn, agent, d, closes, weights)
+    return weights, events, pv
+
+
+@pytest.mark.parametrize("agent, held, new", [
+    ("3", {"A": 0.20}, {s: 0.20 for s in "BCDEF"}),                       # long only, cash floor
+    ("4", {"A": 0.20, "Z": -0.10}, {"B": 0.20, "C": 0.20, "D": 0.20, "E": 0.20, "F": -0.20}),  # long-short
+])
+def test_dropped_stocks_are_sold_and_gross_after_fills_is_within_the_limit(conn, agent, held, new):
+    """Held A (and short Z) are left out of Tuesday's targets. Risk sees gross 1.00 =
+    the limit, no clip; Wednesday's fills close A and Z, so the filled book is the
+    decision's book. Before v1.8, A and Z stayed and gross would have been 1.20 / 1.30."""
+    from execution.risk import profile
+    syms = sorted(set(held) | set(new))
+    closes = {s: 100.0 for s in syms}
+    for d in (MON, TUE, WED):
+        for s in syms:
+            add(conn, s, d, 100.0)
+    settle(conn, agent, MON)
+    _decide_risk_place(conn, agent, MON, closes, held)
+    settle(conn, agent, TUE)
+    acct = LD.load_account(conn, agent, as_of=TUE)
+    assert all(acct.shares(s) != 0 for s in held)
+
+    weights, events, pv = _decide_risk_place(conn, agent, TUE, closes, new)
+    assert events == [] and sum(abs(w) for w in weights.values()) == pytest.approx(1.0)
+    res = settle(conn, agent, WED)
+    acct = LD.load_account(conn, agent, as_of=WED)
+    assert all(acct.shares(s) == 0 for s in held)                         # dropped stocks closed
+    assert {s for s in acct.positions if acct.shares(s) != 0} == set(new)
+    limit = profile(agent).max_gross
+    sized_gross = sum(abs(acct.shares(s)) * closes[s] for s in syms) / pv  # backtest check 5's measure
+    assert sized_gross <= limit + 1e-9
+    assert res.mark.gross_exposure / res.mark.equity <= limit + 0.01      # at the fill day's close
