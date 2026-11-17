@@ -36,6 +36,13 @@ Valid output (v1.8 rule 1, v1.9):
 Targets are the complete portfolio; only the 22 stocks (SPY is context only);
 weights finite numbers; a non-empty reason per target; confidence in [0, 1].
 Weight limits are not checked here: the §6 risk checks clip them afterwards.
+
+Crypto (C1, §13, v1.12): the same harness on a crypto snapshot. The output
+spec (OUTPUT_SPEC_CRYPTO) names the 5 coins and says long only, the limits
+key is max_per_coin, and an unknown symbol's error names the coins. Long only
+and the 50% cap are enforced by the risk checks (profile 'C1'), not here. The
+equity prompt is byte-for-byte what it was. A crypto agent (C0, C1) only
+accepts a crypto snapshot and an equity agent only an equity one.
 """
 
 from __future__ import annotations
@@ -82,6 +89,29 @@ Rules:
 - confidence is a number from 0 to 1.
 - Your limits are in the input; positions beyond them are cut back pro rata."""
 
+CRYPTO_PLACEHOLDER_TEMPLATE = (
+    "PLACEHOLDER PROMPT (the real prompts are written on Sat 5 Dec 2026 and stored in agents/prompts/).\n"
+    "You manage a crypto portfolio of five coins against USD (BTC, ETH, SOL, XRP, DOGE), long only.\n"
+    "Each day after the 00:00 UTC daily bar closes you see a snapshot of market data and your own\n"
+    "portfolio, and you decide your target portfolio. Orders fill at the next available price, with\n"
+    "a 0.25% fee per trade. Aim for the highest return you can within your limits."
+)
+
+OUTPUT_SPEC_CRYPTO = """\
+OUTPUT FORMAT
+Reply with one JSON object and nothing else (a ```json fenced block is also accepted). Either:
+  {"action": "hold", "reasoning": "<why>"}
+to keep your portfolio exactly as it is, or:
+  {"action": "rebalance", "targets": {"<SYMBOL>": <weight>, ...}, "reasons": {"<SYMBOL>": "<one line>", ...}, "reasoning": "<overall reasoning>", "confidence": <0 to 1>}
+Rules:
+- targets is your COMPLETE target portfolio. Any coin you hold and leave out of targets is sold. {} means all cash.
+- A weight is a fraction of your current portfolio value. Long only: no negative weights. Use only the 5 coins in the snapshot, written as in the snapshot (e.g. "BTC/USD").
+- Give a one-line reason for every symbol in targets.
+- confidence is a number from 0 to 1.
+- Your limits are in the input; positions beyond them are cut back pro rata."""
+
+CRYPTO_AGENT_IDS = frozenset({"C0", "C1"})
+
 RETRY_NOTE = ("\n\nYOUR PREVIOUS REPLY WAS INVALID: {error}\n"
               "Reply again with one valid JSON object, following the OUTPUT FORMAT above.")
 
@@ -109,8 +139,16 @@ def _past(d: PastDecision) -> dict:
             "reasons": dict(d.reasons), "reasoning": d.reasoning}
 
 
+def _check_asset_class(agent_id: int | str, snapshot: "Snapshot") -> str:
+    want = "crypto" if str(agent_id) in CRYPTO_AGENT_IDS else "us_equity"
+    if snapshot.asset_class != want:
+        raise ValueError(f"agent {agent_id} decides on {want} snapshots, got {snapshot.asset_class}")
+    return want
+
+
 def prompt_input(agent_id: int | str, snapshot: "Snapshot", portfolio: Portfolio, context: Context) -> dict:
-    """The §4 / D5 inputs of an AI agent, and nothing else."""
+    """The §4 / D5 (§13 for crypto) inputs of an AI agent, and nothing else."""
+    crypto = _check_asset_class(agent_id, snapshot) == "crypto"
     if snapshot.decision_date != context.decision_date.isoformat():
         raise ValueError(f"snapshot is for {snapshot.decision_date}, context for {context.decision_date}")
     memory = context.memory
@@ -143,7 +181,7 @@ def prompt_input(agent_id: int | str, snapshot: "Snapshot", portfolio: Portfolio
             "return_since_start": _r(portfolio.value / memory.starting_value - 1) if memory.starting_value else None,
             "positions": positions,
         },
-        "limits": {"max_per_stock": lim.max_per_stock, "shorts_allowed": lim.shorts,
+        "limits": {("max_per_coin" if crypto else "max_per_stock"): lim.max_per_stock, "shorts_allowed": lim.shorts,
                    "max_gross": lim.max_gross, "max_total_short": lim.max_total_short},
         "last_decisions": [_past(d) for d in past[-LAST_DECISIONS:]],
     }
@@ -151,7 +189,8 @@ def prompt_input(agent_id: int | str, snapshot: "Snapshot", portfolio: Portfolio
 
 def build_prompt(template: str, agent_id: int | str, snapshot: "Snapshot", portfolio: Portfolio,
                  context: Context) -> str:
-    return (template.rstrip() + "\n\n" + OUTPUT_SPEC + "\n\nINPUT\n"
+    spec = OUTPUT_SPEC_CRYPTO if _check_asset_class(agent_id, snapshot) == "crypto" else OUTPUT_SPEC
+    return (template.rstrip() + "\n\n" + spec + "\n\nINPUT\n"
             + _compact(prompt_input(agent_id, snapshot, portfolio, context)))
 
 
@@ -191,7 +230,7 @@ def _number(x) -> bool:
     return not isinstance(x, bool) and isinstance(x, (int, float)) and math.isfinite(x)
 
 
-def parse_and_validate(text: str, universe: Sequence[str]) -> Parsed:
+def parse_and_validate(text: str, universe: Sequence[str], asset_class: str = "us_equity") -> Parsed:
     """Parse the reply and check it against the §8 format. Raises OutputError."""
     if not isinstance(text, str) or not text.strip():
         raise OutputError("empty reply")
@@ -232,10 +271,11 @@ def parse_and_validate(text: str, universe: Sequence[str]) -> Parsed:
         raise OutputError("confidence is required for a rebalance")
     allowed = set(universe)
     for sym, w in targets.items():
-        if sym == BENCHMARK_SYMBOL:
+        if sym == BENCHMARK_SYMBOL and asset_class == "us_equity":
             raise OutputError("SPY is context only; it can't be a target")
         if sym not in allowed:
-            raise OutputError(f"unknown symbol {sym!r}; use only the 22 stocks in the snapshot")
+            what = "the 5 coins" if asset_class == "crypto" else "the 22 stocks"
+            raise OutputError(f"unknown symbol {sym!r}; use only {what} in the snapshot")
         if not _number(w):
             raise OutputError(f"weight for {sym} must be a finite number, got {w!r}")
         r = reasons.get(sym)
@@ -354,7 +394,7 @@ class AIAgent:
                 if resp.finish_reason == "length":
                     raise OutputError(f"reply cut off at the {self.model.max_tokens}-token output limit; "
                                       f"reply more briefly")
-                parsed = parse_and_validate(resp.text, universe)
+                parsed = parse_and_validate(resp.text, universe, snapshot.asset_class)
             except OutputError as e:
                 attempts.append(self._attempt(attempts, "invalid", prompt, resp, error=str(e)))
                 prompt = base if wrong_host else base + RETRY_NOTE.format(error=e)
