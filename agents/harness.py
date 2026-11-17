@@ -266,7 +266,7 @@ class AttemptRecord:
     latency_ms: int | None = None
     parsed: Parsed | None = None
     error: str | None = None
-    reasoning_tokens: int | None = None  # part of tokens_out; not a decisions column (not in row())
+    reasoning_tokens: int | None = None  # part of tokens_out (§8 v1.11)
 
     def row(self) -> dict:
         """decisions columns; the runner adds agent_id, snapshot_id and decided_at.
@@ -280,7 +280,8 @@ class AttemptRecord:
             "provider_served": self.provider_served, "reasoning_setting": self.reasoning_setting,
             "temperature": self.temperature, "prompt_hash": self.prompt_hash,
             "raw_response": self.raw_response, "tokens_in": self.tokens_in,
-            "tokens_out": self.tokens_out, "cost_usd": self.cost_usd, "latency_ms": self.latency_ms,
+            "tokens_out": self.tokens_out, "reasoning_tokens": self.reasoning_tokens,
+            "cost_usd": self.cost_usd, "latency_ms": self.latency_ms,
             "parsed_targets": None if p is None else _compact(None if p.targets is None else dict(p.targets)),
             "reasons": None if p is None or p.reasons is None else _compact(dict(p.reasons)),
             "overall_reasoning": None if p is None else p.reasoning,

@@ -36,6 +36,16 @@ APPEND_ONLY_TABLES = (
 )
 ALL_TABLES = ("agents",) + APPEND_ONLY_TABLES
 
+# Columns added after a table was first created. schema.sql has them too (as the
+# table's last columns), but its CREATE TABLE IF NOT EXISTS leaves an existing
+# table alone, so init_db adds any that are missing. ADD COLUMN doesn't rewrite
+# rows and fires no UPDATE trigger; existing rows read NULL ("not recorded").
+COLUMN_UPGRADES = (
+    ("decisions", "reasoning_tokens",
+     "INTEGER CHECK (reasoning_tokens IS NULL OR (reasoning_tokens >= 0 AND "
+     "(tokens_out IS NULL OR reasoning_tokens <= tokens_out)))"),
+)
+
 
 def utc_ts(dt: datetime | None = None) -> str:
     """Format a timestamp the way the schema requires: 2026-11-16T22:45:00.123Z.
@@ -63,11 +73,16 @@ def connect(path: str | Path = DEFAULT_DB_PATH) -> sqlite3.Connection:
 def init_db(path: str | Path = DEFAULT_DB_PATH) -> sqlite3.Connection:
     """Create (or bring up to date) the schema and return a connection.
 
-    Safe to call repeatedly: the schema only uses IF NOT EXISTS / INSERT OR IGNORE.
+    Safe to call repeatedly: the schema only uses IF NOT EXISTS / INSERT OR IGNORE,
+    and COLUMN_UPGRADES only adds columns that are missing.
     """
     conn = connect(path)
     conn.executescript(SCHEMA_PATH.read_text(encoding="utf-8"))
     conn.execute("PRAGMA foreign_keys = ON")  # executescript commits; keep FKs on
+    with conn:
+        for table, column, definition in COLUMN_UPGRADES:
+            if column not in {r[1] for r in conn.execute(f"PRAGMA table_info({table})")}:
+                conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
     return conn
 
 

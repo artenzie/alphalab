@@ -133,6 +133,9 @@ CREATE TABLE IF NOT EXISTS decisions (
     confidence        REAL CHECK (confidence IS NULL OR (confidence BETWEEN 0 AND 1)),
     error             TEXT,                         -- validation / transport error, if any
     corrects_id       INTEGER REFERENCES decisions(decision_id),
+    -- added 17 Nov 2026 (§8 v1.11); last so a fresh table matches one upgraded by
+    -- ALTER TABLE ADD COLUMN (db.COLUMN_UPGRADES). Part of tokens_out; NULL = not reported
+    reasoning_tokens  INTEGER CHECK (reasoning_tokens IS NULL OR (reasoning_tokens >= 0 AND (tokens_out IS NULL OR reasoning_tokens <= tokens_out))),
     CHECK (status <> 'ok' OR parsed_targets IS NOT NULL)
 );
 CREATE UNIQUE INDEX IF NOT EXISTS ux_decisions_attempt

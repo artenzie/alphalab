@@ -281,7 +281,7 @@ def test_through_aiagent_ok():
     assert dec.record.status == "ok" and dict(dec.weights) == {"AAPL": 0.2, "NVDA": -0.1}
     assert (row["model_id"], row["provider_served"], row["reasoning_setting"], row["temperature"]) == \
         ("openai/gpt-6.1-sol-20261101", "OpenAI", "medium", None)
-    assert (row["tokens_in"], row["tokens_out"], row["latency_ms"]) == (5123, 812, 1250)
+    assert (row["tokens_in"], row["tokens_out"], row["reasoning_tokens"], row["latency_ms"]) == (5123, 812, 600, 1250)
 
 
 def test_through_aiagent_wrong_model_twice_holds_invalid():

@@ -246,3 +246,80 @@ def test_same_fetch_cannot_insert_a_bar_twice(conn):
     add_price(conn)
     with pytest.raises(sqlite3.IntegrityError):
         add_price(conn)
+
+
+# ---------------------------------------------------------------------------
+# Column upgrades (reasoning_tokens, §8 v1.11)
+# ---------------------------------------------------------------------------
+
+def _columns(c, table="decisions"):
+    return [tuple(r)[1:] for r in c.execute(f"PRAGMA table_info({table})")]   # name, type, notnull, default, pk
+
+
+def _old_schema_db(path):
+    """A database built with the schema before reasoning_tokens existed."""
+    sql = db.SCHEMA_PATH.read_text(encoding="utf-8")
+    start = sql.index("    -- added 17 Nov 2026")
+    end = sql.index("    CHECK (status <> 'ok' OR parsed_targets IS NOT NULL)")
+    old = sql[:start] + sql[end:]
+    assert "reasoning_tokens" not in old
+    c = sqlite3.connect(str(path))
+    c.executescript(old)
+    c.close()
+
+
+def test_fresh_db_has_reasoning_tokens_last(conn):
+    assert _columns(conn)[-1][0] == "reasoning_tokens"
+
+
+def test_init_db_upgrades_old_decisions_table(tmp_path):
+    _old_schema_db(tmp_path / "old.db")
+    raw = sqlite3.connect(str(tmp_path / "old.db"))
+    assert "reasoning_tokens" not in [r[0] for r in _columns(raw)]
+    raw.close()
+    up = db.init_db(tmp_path / "old.db")
+    up.close()
+    up = db.init_db(tmp_path / "old.db")                       # second run is a no-op
+    fresh = db.init_db(tmp_path / "fresh.db")
+    assert _columns(up) == _columns(fresh)
+    for t in db.ALL_TABLES:
+        assert _columns(up, t) == _columns(fresh, t), t
+    triggers = "SELECT name FROM sqlite_master WHERE type = 'trigger' ORDER BY name"
+    assert [r[0] for r in up.execute(triggers)] == [r[0] for r in fresh.execute(triggers)]
+    up.close()
+    fresh.close()
+
+
+def test_upgrade_keeps_existing_rows_with_null(tmp_path):
+    _old_schema_db(tmp_path / "old.db")
+    c = db.connect(tmp_path / "old.db")
+    sid = add_snapshot(c)
+    did = add_decision(c, sid)
+    c.commit()
+    c.close()
+    up = db.init_db(tmp_path / "old.db")
+    row = up.execute("SELECT decision_id, tokens_out, reasoning_tokens FROM decisions").fetchone()
+    assert tuple(row) == (did, 300, None)
+    with pytest.raises(sqlite3.IntegrityError, match="append-only"):
+        up.execute("UPDATE decisions SET reasoning_tokens = 1")
+    up.close()
+
+
+def _decision_with(conn, tokens_out, reasoning_tokens):
+    sid = add_snapshot(conn)
+    return conn.execute(
+        """INSERT INTO decisions (agent_id, snapshot_id, decided_at, status, parsed_targets,
+               tokens_out, reasoning_tokens) VALUES ('8', ?, ?, 'ok', '{}', ?, ?)""",
+        (sid, DECIDED, tokens_out, reasoning_tokens)).lastrowid
+
+
+@pytest.mark.parametrize("tokens_out,reasoning", [(300, 0), (300, 250), (300, 300), (300, None), (None, 50)])
+def test_reasoning_tokens_accepted(conn, tokens_out, reasoning):
+    did = _decision_with(conn, tokens_out, reasoning)
+    assert conn.execute("SELECT reasoning_tokens FROM decisions WHERE decision_id = ?", (did,)).fetchone()[0] == reasoning
+
+
+@pytest.mark.parametrize("tokens_out,reasoning", [(300, -1), (300, 301)])
+def test_reasoning_tokens_rejected(conn, tokens_out, reasoning):
+    with pytest.raises(sqlite3.IntegrityError):
+        _decision_with(conn, tokens_out, reasoning)

@@ -89,7 +89,7 @@ def test_valid_rebalance():
     assert (row["model_id"], row["provider_served"], row["raw_response"]) == (MODEL, PROVIDER, REBAL)
     assert row["prompt_hash"] == sha256(client.prompts[0])
     assert (row["temperature"], row["reasoning_setting"]) == (None, "medium")     # Claude takes no temperature
-    assert a.reasoning_tokens == 40 and "reasoning_tokens" not in row
+    assert a.reasoning_tokens == row["reasoning_tokens"] == 40
     assert client.calls[0]["model"] is CLAUDE
 
 
@@ -364,6 +364,10 @@ def test_rows_insert_into_decisions_table(tmp_path):
                          tuple(row.values()))
     n = conn.execute("SELECT count(*) FROM decisions").fetchone()[0]
     assert n == sum(len(d.record.attempts) for d in decisions) == 1 + 1 + 2 + 2 + 4 + 1
+    stored = conn.execute("SELECT status, tokens_out, reasoning_tokens FROM decisions ORDER BY decision_id").fetchall()
+    assert [tuple(r) for r in stored] == ([("ok", 150, 40)] * 2 + [("invalid", 150, 40), ("ok", 150, 40)]
+                                          + [("invalid", 150, 40)] * 2 + [("unavailable", None, None)] * 4
+                                          + [("capped", None, None)])
     conn.close()
 
 
