@@ -1,45 +1,33 @@
-"""Gate 1: check the frozen model lineup (protocol section 8).
+"""Gate 1: check the frozen model lineup (protocol section 8, v1.10).
 
-Calls each chosen model once through OpenRouter, pinned to its official
-provider with fallbacks off, and prints which provider actually served it.
-Never prints the API key.  Run from the repo root:  python3 scripts/test_pinned.py
+Calls each model in agents/models.py once through the OpenRouter client,
+pinned to its official provider's standard endpoint with fallbacks off, and
+prints which provider served it and which model it reported.
+Never prints the API key.  Run from the repo root:  venv/bin/python scripts/test_pinned.py
 """
-import os
+import sys
+from pathlib import Path
 
-import requests
 from dotenv import load_dotenv
 
-load_dotenv()
-H = {"Authorization": f"Bearer {os.getenv('OPENROUTER_API_KEY')}"}
-URL = "https://openrouter.ai/api/v1/chat/completions"
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+from agents.llm import LLMCapped, LLMUnavailable, model_matches  # noqa: E402
+from agents.models import MODELS  # noqa: E402
+from agents.openrouter import OpenRouterClient, OpenRouterError  # noqa: E402
 
-LINEUP = [  # (agent, model id, official provider names allowed)
-    ("Claude   (8)", "anthropic/claude-sonnet-5.5", ["Anthropic"]),
-    ("GPT      (9)", "openai/gpt-6.1-sol", ["OpenAI"]),
-    ("Gemini  (10)", "google/gemini-4-carbon", ["Google AI Studio", "Google"]),
-    ("DeepSeek(11)", "deepseek/deepseek-v4-pro-0813", ["DeepSeek"]),
-    ("Grok    (12)", "x-ai/grok-4.7", ["xAI"]),
-]
+load_dotenv(ROOT / ".env")
+client = OpenRouterClient()
 
 ok = True
-for agent, model, providers in LINEUP:
-    body = {
-        "model": model,
-        "max_tokens": 200,
-        "messages": [{"role": "user", "content": "Reply with the single word: ready"}],
-        "provider": {"only": providers, "allow_fallbacks": False},
-    }
+for m in MODELS.values():
     try:
-        r = requests.post(URL, headers=H, json=body, timeout=120)
-        if r.status_code == 200:
-            served = r.json().get("provider", "?")
-            good = served in providers
-            ok &= good
-            print(f"{agent}  {'OK ' if good else 'BAD'}  {model:32} served by {served}")
-        else:
-            ok = False
-            print(f"{agent}  ERR  {model:32} {r.status_code} {r.text[:160]}")
-    except requests.RequestException as e:
+        r = client.complete("Reply with the single word: ready", model=m)
+        good = r.provider_served in m.provider_names and model_matches(m.model_id, r.model_id)
+        ok &= good
+        print(f"{m.name:9} {'OK ' if good else 'BAD'}  {m.model_id:32} served by {r.provider_served}, "
+              f"reported {r.model_id}")
+    except (LLMUnavailable, LLMCapped, OpenRouterError) as e:
         ok = False
-        print(f"{agent}  ERR  {model:32} {type(e).__name__}")
+        print(f"{m.name:9} ERR  {m.model_id:32} {type(e).__name__}: {e}")
 print("\nLineup confirmed: every model served by its own maker." if ok else "\nProblem: paste this output to Claude.")

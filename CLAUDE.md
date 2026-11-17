@@ -24,10 +24,12 @@ AlphaLab is a research project that runs AI trading agents against Alpaca **pape
 | `execution/risk.py` | §6 risk checks (`apply_risk`, `margin_check`), pure functions |
 | `execution/ledger.py` | §7 ledger accounting core (orders, fills, accruals, marks, margin, delisting), pure functions |
 | `execution/ledger_db.py` | Ledger on the append-only tables: `settle_day` (fill at open, accrue, mark), `place_orders` |
-| `scripts/` | One-off tools: build_universe, OpenRouter model checks, backtest_indicators/risk/ledger |
+| `scripts/` | One-off tools: build_universe, OpenRouter model checks (`test_pinned`, `smoke_ai`), backtest_indicators/risk/ledger. Never collected by pytest (`pytest.ini`) |
 | `tests/` | pytest suite |
 | `agents/harness.py` | `AIAgent`: same `decide` interface; prompt, JSON validation, §8 retries, call record per attempt |
 | `agents/llm.py` | `LLMClient` interface, `FakeClient` for tests |
+| `agents/models.py` | Frozen §8 model lineup as data (agent → model, endpoints, reasoning, temperature) |
+| `agents/openrouter.py` | `OpenRouterClient`: pinned endpoints, no fallbacks, error mapping, key never logged |
 | `agents/prompts/`, `analysis/`, `dashboard/` | Not built yet (prompts Sat 5 Dec) |
 
 ## Working here

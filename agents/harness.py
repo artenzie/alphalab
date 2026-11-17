@@ -1,7 +1,6 @@
-"""The AI agent harness: one interface every model plugs into (protocol §4, §5, §8).
+"""The AI agent harness: one interface every model plugs into (protocol §4, §5, §8, v1.10).
 
-    agent = AIAgent(agent_id=8, model_id="anthropic/claude-sonnet-5.5", provider="Anthropic",
-                    template=PLACEHOLDER_TEMPLATE, client=client)
+    agent = AIAgent(agent_id=8, model=model_for(8), template=PLACEHOLDER_TEMPLATE, client=client)
     decision = agent(snapshot, portfolio, context)      # same call as agents 1-6
     for attempt in decision.record.attempts:             # one decisions row per call
         row = attempt.row()
@@ -22,10 +21,13 @@ Calls (§8):
   * LLMUnavailable -> 3 retries, waiting 5, 10 and 15 minutes; still down ->
     hold, status 'unavailable'. Never another model or provider.
   * LLMCapped -> hold, status 'capped', no retry.
-  * served by another provider -> that attempt is 'invalid'.
+  * served by a provider not in model.provider_names, or reporting a model id
+    that isn't the requested one or a dated variant of it -> that attempt is
+    'invalid' (the row logs the reported id; the error names both).
+  * a reply cut off at max output (finish_reason 'length') -> 'invalid'.
   * invalid output -> one retry with the validation error shown (a wrong
-    provider is retried with the original prompt); still invalid -> hold,
-    status 'invalid'.
+    provider or model is retried with the original prompt); still invalid ->
+    hold, status 'invalid'.
 
 Valid output (v1.8 rule 1, v1.9):
   {"action": "hold", "reasoning": "..."}
@@ -47,7 +49,8 @@ from dataclasses import dataclass, field
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Callable, Mapping, Sequence
 
-from agents.llm import LLMCapped, LLMClient, LLMResponse, LLMUnavailable
+from agents.llm import LLMCapped, LLMClient, LLMResponse, LLMUnavailable, model_matches
+from agents.models import ModelConfig
 from execution.risk import profile
 from strategies.base import (BENCHMARK_SYMBOL, Context, Decision, PastDecision, Portfolio,
                              stock_fields)
@@ -263,6 +266,7 @@ class AttemptRecord:
     latency_ms: int | None = None
     parsed: Parsed | None = None
     error: str | None = None
+    reasoning_tokens: int | None = None  # part of tokens_out; not a decisions column (not in row())
 
     def row(self) -> dict:
         """decisions columns; the runner adds agent_id, snapshot_id and decided_at.
@@ -314,16 +318,12 @@ class _Stop(Exception):
 class AIAgent:
     """An AI agent with the Agent interface: agent(snapshot, portfolio, context) -> AIDecision."""
 
-    def __init__(self, agent_id: int | str, model_id: str, provider: str, template: str,
-                 client: LLMClient, temperature: float | None = 0.0, reasoning: str = "default",
+    def __init__(self, agent_id: int | str, model: ModelConfig, template: str, client: LLMClient,
                  sleep: Callable[[float], None] = time.sleep, backoff: Sequence[float] = BACKOFF_S):
         profile(agent_id)                     # unknown agent id fails at construction
         self.agent_id = agent_id
-        self.model_id = model_id
-        self.provider = provider
+        self.model = model
         self.template = template
-        self.temperature = temperature
-        self.reasoning = reasoning
         self._client = client
         self._sleep = sleep
         self._backoff = tuple(backoff)
@@ -341,15 +341,22 @@ class AIAgent:
                 resp = self._send(prompt, attempts)
             except _Stop as stop:
                 return self._hold(stop.status, attempts)
+            wrong_host = True                 # wrong provider or model: the model made no mistake
             try:
-                if resp.provider_served != self.provider:
-                    wrong_provider = True
-                    raise OutputError(f"served by {resp.provider_served!r}, pinned to {self.provider!r}")
-                wrong_provider = False
+                if resp.provider_served not in self.model.provider_names:
+                    raise OutputError(f"served by {resp.provider_served!r}, "
+                                      f"pinned to {' / '.join(map(repr, self.model.provider_names))}")
+                if not model_matches(self.model.model_id, resp.model_id):
+                    raise OutputError(f"wrong model: requested {self.model.model_id!r}, "
+                                      f"reported {resp.model_id!r}")
+                wrong_host = False
+                if resp.finish_reason == "length":
+                    raise OutputError(f"reply cut off at the {self.model.max_tokens}-token output limit; "
+                                      f"reply more briefly")
                 parsed = parse_and_validate(resp.text, universe)
             except OutputError as e:
                 attempts.append(self._attempt(attempts, "invalid", prompt, resp, error=str(e)))
-                prompt = base if wrong_provider else base + RETRY_NOTE.format(error=e)
+                prompt = base if wrong_host else base + RETRY_NOTE.format(error=e)
                 continue
             attempts.append(self._attempt(attempts, "ok", prompt, resp, parsed=parsed))
             record = DecisionRecord("ok", tuple(attempts))
@@ -364,8 +371,7 @@ class AIAgent:
             if wait:
                 self._sleep(wait)
             try:
-                return self._client.complete(prompt, model_id=self.model_id, provider=self.provider,
-                                             temperature=self.temperature, reasoning=self.reasoning)
+                return self._client.complete(prompt, model=self.model)
             except LLMCapped as e:
                 attempts.append(self._attempt(attempts, "capped", prompt, None, error=f"capped: {e}"))
                 raise _Stop("capped") from None
@@ -375,15 +381,16 @@ class AIAgent:
         raise _Stop("unavailable")
 
     def _attempt(self, attempts, status, prompt, resp: LLMResponse | None, parsed=None, error=None):
-        common = dict(attempt=len(attempts) + 1, status=status, model_id=self.model_id,
-                      reasoning_setting=self.reasoning, temperature=self.temperature,
+        common = dict(attempt=len(attempts) + 1, status=status, model_id=self.model.model_id,
+                      reasoning_setting=self.model.reasoning, temperature=self.model.temperature,
                       prompt_hash=sha256(prompt), parsed=parsed, error=error)
         if resp is None:
             return AttemptRecord(**common)
         common["model_id"] = resp.model_id            # the model id the provider reports
         return AttemptRecord(**common, provider_served=resp.provider_served, raw_response=resp.text,
                              tokens_in=resp.tokens_in, tokens_out=resp.tokens_out,
-                             cost_usd=resp.cost_usd, latency_ms=resp.latency_ms)
+                             cost_usd=resp.cost_usd, latency_ms=resp.latency_ms,
+                             reasoning_tokens=resp.reasoning_tokens)
 
     def _hold(self, status: str, attempts: list[AttemptRecord]) -> AIDecision:
         last = attempts[-1].error or status

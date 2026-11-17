@@ -1,4 +1,4 @@
-"""The AI agent harness (agents/harness.py, agents/llm.py): protocol §4, §5 (v1.9), §8.
+"""The AI agent harness (agents/harness.py, agents/llm.py): protocol §4, §5 (v1.9), §8 (v1.10).
 
 FakeClient only: no network, no API keys. Snapshots come from the synthetic
 make_snapshot in test_strategies.py.
@@ -19,13 +19,14 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from agents import harness  # noqa: E402
 from agents.harness import (AIAgent, AIDecision, OutputError, PLACEHOLDER_TEMPLATE,  # noqa: E402
                             build_prompt, parse_and_validate, sha256)
-from agents.llm import FakeClient, LLMCapped, LLMResponse, LLMUnavailable  # noqa: E402
+from agents.llm import FakeClient, LLMCapped, LLMResponse, LLMUnavailable, model_matches  # noqa: E402
+from agents.models import CLAUDE, GEMINI  # noqa: E402
 from data import db  # noqa: E402
 from strategies.base import AgentMemory, Decision, PastDecision, Portfolio  # noqa: E402
 from test_strategies import EMPTY, RUN, STOCKS, ctx, make_snapshot, sealed  # noqa: E402
 
 D = RUN[5]
-MODEL, PROVIDER = "anthropic/claude-sonnet-5.5", "Anthropic"
+MODEL, PROVIDER = CLAUDE.model_id, "Anthropic"
 MEMORY = AgentMemory(
     starting_value=100_000.0, avg_cost={"AAPL": 210.0},
     last_decisions=tuple(PastDecision(RUN[i], "ok", {"AAPL": 0.1}, {"AAPL": "trend"}, f"day {i}")
@@ -42,13 +43,14 @@ def context(d=D, memory=MEMORY):
     return replace(ctx(d), memory=memory)
 
 
-def resp(text, provider=PROVIDER, model=MODEL):
-    return LLMResponse(text, model, provider, tokens_in=1200, tokens_out=150, cost_usd=0.0042, latency_ms=850)
+def resp(text, provider=PROVIDER, model=MODEL, finish="stop"):
+    return LLMResponse(text, model, provider, tokens_in=1200, tokens_out=150, cost_usd=0.0042, latency_ms=850,
+                       reasoning_tokens=40, finish_reason=finish)
 
 
-def run(script, portfolio=HOLDING, d=D, agent_id=8):
+def run(script, portfolio=HOLDING, d=D, agent_id=8, config=CLAUDE):
     client, sleeps = FakeClient(script), []
-    agent = AIAgent(agent_id, MODEL, PROVIDER, PLACEHOLDER_TEMPLATE, client, sleep=sleeps.append)
+    agent = AIAgent(agent_id, config, PLACEHOLDER_TEMPLATE, client, sleep=sleeps.append)
     return agent(make_snapshot(d), portfolio, context(d)), client, sleeps
 
 
@@ -86,9 +88,9 @@ def test_valid_rebalance():
     assert (row["tokens_in"], row["tokens_out"], row["cost_usd"], row["latency_ms"]) == (1200, 150, 0.0042, 850)
     assert (row["model_id"], row["provider_served"], row["raw_response"]) == (MODEL, PROVIDER, REBAL)
     assert row["prompt_hash"] == sha256(client.prompts[0])
-    assert (row["temperature"], row["reasoning_setting"]) == (0.0, "default")
-    call = client.calls[0]
-    assert (call["model_id"], call["provider"], call["temperature"]) == (MODEL, PROVIDER, 0.0)
+    assert (row["temperature"], row["reasoning_setting"]) == (None, "medium")     # Claude takes no temperature
+    assert a.reasoning_tokens == 40 and "reasoning_tokens" not in row
+    assert client.calls[0]["model"] is CLAUDE
 
 
 def test_empty_targets_mean_all_cash():
@@ -206,7 +208,7 @@ def test_client_down_holds_unavailable():
     assert len(client.calls) == 4 and sleeps == [300, 600, 900] and sum(sleeps) == 1800
     assert [a.status for a in dec.record.attempts] == ["unavailable"] * 4
     assert all(a.provider_served is None and a.error == "unavailable: 503" for a in dec.record.attempts)
-    assert {c["model_id"] for c in client.calls} == {MODEL} and {c["provider"] for c in client.calls} == {PROVIDER}
+    assert all(c["model"] is CLAUDE for c in client.calls)
 
 
 def test_client_down_then_recovers():
@@ -228,6 +230,47 @@ def test_wrong_provider_is_invalid():
 def test_wrong_provider_then_right_provider():
     dec, _, _ = run([resp(REBAL, provider="SomeHost"), resp(REBAL)])
     assert dec.record.status == "ok" and not dec.is_hold
+
+
+def test_second_official_provider_name_is_accepted():
+    dec, _, _ = run([resp(REBAL, provider="Google", model=GEMINI.model_id)], agent_id=10, config=GEMINI)
+    assert dec.record.status == "ok"
+    assert dec.record.attempts[0].row()["temperature"] == 0.0
+
+
+@pytest.mark.parametrize("reported", [MODEL, MODEL + "-20261013", MODEL + "-2026-10-13", MODEL + "-1013",
+                                      MODEL + "@20261013"])
+def test_model_id_dated_variants_match(reported):
+    assert model_matches(MODEL, reported)
+
+
+@pytest.mark.parametrize("reported", [None, "", "anthropic/claude-opus-5.5", MODEL + "-thinking", MODEL + "-pro",
+                                      MODEL + "20261013", MODEL + "-202610", "x" + MODEL, MODEL[:-1]])
+def test_model_id_other_models_do_not_match(reported):
+    assert not model_matches(MODEL, reported)
+
+
+def test_wrong_model_is_invalid_and_logs_both_ids():
+    dec, client, _ = run([resp(REBAL, model="anthropic/claude-haiku-5.5"), resp(REBAL, model="anthropic/claude-haiku-5.5")])
+    assert dec.is_hold and dec.record.status == "invalid"
+    a1 = dec.record.attempts[0]
+    assert a1.status == "invalid" and a1.parsed is None
+    assert a1.row()["model_id"] == "anthropic/claude-haiku-5.5"                          # reported id in the row
+    assert a1.error == f"wrong model: requested {MODEL!r}, reported 'anthropic/claude-haiku-5.5'"
+    assert client.prompts[0] == client.prompts[1]      # original prompt on retry
+
+
+def test_wrong_model_then_dated_variant_ok():
+    dec, _, _ = run([resp(REBAL, model="openai/gpt-6.1-sol"), resp(REBAL, model=MODEL + "-20261013")])
+    assert dec.record.status == "ok" and dec.record.attempts[1].row()["model_id"] == MODEL + "-20261013"
+
+
+def test_cut_off_reply_is_invalid_even_if_it_parses():
+    dec, client, _ = run([resp(HOLD, finish="length"), resp(REBAL)])
+    assert dec.record.status == "ok"
+    a1 = dec.record.attempts[0]
+    assert a1.status == "invalid" and "cut off at the 16000-token output limit" in a1.error
+    assert "YOUR PREVIOUS REPLY WAS INVALID" in client.prompts[1]
 
 
 def test_capped_holds_without_retry():
@@ -296,7 +339,7 @@ def test_prompt_guards():
 
 def test_unknown_agent_id_fails_at_construction():
     with pytest.raises(KeyError):
-        AIAgent(99, MODEL, PROVIDER, "t", FakeClient([]))
+        AIAgent(99, CLAUDE, "t", FakeClient([]))
 
 
 # ---------------------------------------------------------------------------
@@ -330,10 +373,11 @@ def test_rows_insert_into_decisions_table(tmp_path):
 
 AGENT_FILES = sorted((ROOT / "agents").glob("*.py"))
 ALLOWED = {"__future__", "hashlib", "json", "math", "re", "time", "dataclasses", "types", "typing",
-           "strategies.base", "execution.risk", "agents.llm", "data.snapshot"}
+           "strategies.base", "execution.risk", "agents.llm", "agents.models", "data.snapshot"}
+NETWORK_FILES = {"openrouter.py"}        # the one module that talks to the outside (tests/test_openrouter.py)
 
 
-@pytest.mark.parametrize("path", AGENT_FILES, ids=lambda p: p.stem)
+@pytest.mark.parametrize("path", [p for p in AGENT_FILES if p.name not in NETWORK_FILES], ids=lambda p: p.stem)
 def test_agent_files_import_only_allowed_modules(path):
     tree = ast.parse(path.read_text())
     imported = set()
