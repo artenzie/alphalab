@@ -1,6 +1,6 @@
 # Experiment protocol
 
-**Version:** v1.9, Tue 17 Nov 2026 (Gate 1 + crypto timings + day-1 decisions + agent 4/5 clarifications + agent 4 capacity, pro rata clipping + ledger rules + cash floor + dust buys + complete targets + AI targets stocks only)
+**Version:** v1.10, Tue 17 Nov 2026 (Gate 1 + crypto timings + day-1 decisions + agent 4/5 clarifications + agent 4 capacity, pro rata clipping + ledger rules + cash floor + dust buys + complete targets + AI targets stocks only + AI call settings)
 **Next:** final freeze as `protocol-v2.0` on Sun 10 Jan 2027, after the shakedown.
 
 All numbers were approved at the Gate 1 review on Sat 14 Nov 2026. The universe and model lineup were filled in from the Gate 1 scripts the same evening. Everything follows from decisions D1–D9 in `research/decisions.md`.
@@ -168,13 +168,14 @@ AI agents are not told what other agents exist or how they are doing.
 
 | Setting | Value |
 |---|---|
-| Access | All models through OpenRouter (D8), each **pinned to its official provider with fallbacks off**: Anthropic, OpenAI, Google, DeepSeek, xAI |
+| Access | All models through OpenRouter (D8), each **pinned to its official provider with fallbacks off**: Anthropic, OpenAI, Google, DeepSeek, xAI. Pinned to the provider's **standard endpoint** (OpenRouter tags `anthropic`, `openai`, `google-ai-studio` / `google-vertex`, `deepseek`, `xai`), not its flex, fast or priority tiers, so price and latency don't vary by tier. Parameters a provider doesn't support are rejected, never silently dropped |
 | Models | Claude, GPT, Gemini, DeepSeek, Grok (D9), chosen at **one price tier** (about $2 per million input tokens) rather than each maker's most expensive model, so cost doesn't decide the comparison |
 | Model IDs | `anthropic/claude-sonnet-5.5` (Anthropic) · `openai/gpt-6.1-sol` (OpenAI) · `google/gemini-4-carbon` (Google) · `deepseek/deepseek-v4-pro-0813` (DeepSeek) · `x-ai/grok-4.7` (xAI). Checked by `scripts/test_pinned.py` |
 | Data policy | OpenRouter's account setting allows providers that may keep or train on prompts, because DeepSeek's own API is one of them. Prompts contain only public market data and the prompt wording; nothing personal. Every other model is pinned to its maker, so this setting changes nothing for them |
-| Reasoning | Each model's default reasoning setting; where a level must be chosen, **medium**. No "pro"/extended modes. The setting used is logged with every call |
+| Reasoning | Effort **medium**, set explicitly for all five models, so no model runs without reasoning while another reasons by default. No "pro"/extended modes. The setting used is logged with every call |
 | Agents 7, 13, 14, 15 and C1 | Same Claude model version as agent 8 |
-| Temperature | 0 where the model allows it; otherwise the provider default, recorded |
+| Temperature | 0 where the model allows it (Gemini, DeepSeek, Grok); otherwise not sent, so the provider default applies (Claude, GPT), recorded per call |
+| Max output | 16,000 tokens per call for all five models, reasoning included. A reply cut off at the limit is invalid output |
 | Tools | None: no web, no code execution |
 | Calls | One call per agent per decision |
 | Output | JSON: target weight per symbol, one-line reason per position, overall reasoning, confidence 0–1 |
@@ -182,7 +183,7 @@ AI agents are not told what other agents exist or how they are doing.
 | Provider down | Three retries with back-off over 30 minutes. Still down: hold, log as `unavailable`. Never substitute another model or provider |
 | Spend cap | One OpenRouter workspace budget: $15 a month, reviewed at the Wed 9 Dec cost check. Cap reached: hold, log as `capped` |
 
-Every call is logged: prompt hash, model ID, the provider that actually served it, full response, tokens in and out, cost and latency. A call served by any other provider is treated as invalid.
+Every call is logged: prompt hash, model ID, the provider that actually served it, full response, tokens in and out, cost and latency. A call served by any other provider, or reporting a model other than the requested ID or a dated variant of it, is treated as invalid (both IDs logged).
 
 ## 9 · Logging (append-only)
 
@@ -259,3 +260,4 @@ Reported separately. Never ranked or tested against the equity agents.
 - **v1.8** · Sun 15 Nov 2026 · §7 rule 1: a non-hold decision is the complete target portfolio; a held symbol left out goes to 0 (replaces "a symbol an agent leaves out keeps its shares"). The §6 risk checks therefore see the whole resulting portfolio. Prompted by the first two-year control backtest, where agents 3–6 never sold stocks they dropped (agent 6 reached 2.9× gross, agent 5's buys went unfunded every day).
 - **v1.8 (clerical)** · Sun 15 Nov 2026 · §7 rule 3: a short target within 10⁻⁹ of a whole share is snapped to it before rounding towards zero. Without this, float noise turned an unchanged −10-share target into −9 in about 10% of cases (a spurious resize of agent 4's kept shorts). No number changed.
 - **v1.9** · Tue 17 Nov 2026 · §5: AI agents (7–15) may target only the 22 stocks. SPY stays in their snapshot as market context; a target on SPY is invalid output (§8: one retry with the error shown, then hold). SPY is the benchmark every agent is measured against, not a holding for the agents being compared to it. Written down before the AI harness was coded; no number changed.
+- **v1.10** · Tue 17 Nov 2026 · §8 call settings, fixed before the OpenRouter client was coded. (1) Each model is pinned to its provider's standard endpoint, not flex/fast/priority tiers, and unsupported parameters are rejected rather than dropped. (2) Max output 16,000 tokens for all five, reasoning included, so a runaway reasoning trace can't run up the bill; a cut-off reply is invalid. (3) Reasoning effort **medium** for all five, replacing "each model's default". Fairness: the defaults differ by maker (some models reason by default, others answer without reasoning unless asked), so "default" would have compared reasoning models with non-reasoning ones and confounded the model comparison with a setting. One explicit level puts every model on the same footing. Temperature is unchanged: 0 where accepted (Gemini, DeepSeek, Grok); Claude and GPT accept none, so it isn't sent and is recorded as the provider default. (4) A reply reporting a model other than the requested ID or a dated variant of it is invalid, like a wrong provider; both IDs are logged.
