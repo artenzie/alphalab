@@ -110,7 +110,8 @@ class Market:
 
     def __init__(self, clock, bad=None, missing=()):
         self.clock, self.bad, self.missing = clock, bad or {}, set(missing)
-        self.ingests, self.fill_fetches = [], []
+        self.ingests, self.fill_fetches, self.window_starts = [], [], []
+        self.no_trades: set[str] = set()
 
     def ingest(self, conn, asset_class, run_id, now):
         t = now()
@@ -138,13 +139,21 @@ class Market:
                          "'finished', ?, ?)", (run_id, db.utc_ts(now()), json.dumps({"inserted": len(rows)})))
         return 0
 
-    def fill_prices(self, conn, dates, run_id, now):
+    def fill_prices(self, conn, dates, run_id, now, window_starts=None):
         for d in dates:
             self.fill_fetches.append(d)
-            w0 = cal.crypto_times(d).decide_at
+            w0 = (window_starts or {}).get(d) or cal.crypto_times(d).decide_at
+            self.window_starts.append(w0)
             fetched = db.utc_ts(now())
             with conn:
+                if now() >= w0 + timedelta(hours=1):
+                    conn.execute("INSERT INTO crypto_fill_windows (decision_date, window_start, window_end, symbols, "
+                                 "fetched_at, run_id) VALUES (?, ?, ?, ?, ?, ?)",
+                                 (d.isoformat(), db.utc_ts(w0), db.utc_ts(w0 + timedelta(hours=1)),
+                                  json.dumps(sorted(CRYPTO_SYMBOLS)), fetched, run_id))
                 for s in CRYPTO_SYMBOLS:
+                    if s in self.no_trades:
+                        continue
                     base = cr_close(s, d + timedelta(days=1)) if d + timedelta(days=1) >= CR_FIRST else 1.0
                     for m in range(60):
                         o = base * (1 + 0.0001 * m)
@@ -478,11 +487,87 @@ def test_crypto_end_to_end(conn, clients):
     assert counts(conn) == before
 
 
-def test_crypto_late_run_is_labelled_and_decides(conn, clients):
+def crypto_fills(conn):
+    return conn.execute("""SELECT o.agent_id, o.symbol, o.created_at, f.status, f.filled_at, f.reference_price,
+                                  f.detail FROM orders o JOIN fills f USING (order_id)
+                           ORDER BY o.agent_id, o.symbol""").fetchall()
+
+
+def bar_open(sym, decision_date, minute=0):
+    """The fake fill bar's open, `minute` minutes into its window (Market.fill_prices)."""
+    return cr_close(sym, decision_date + timedelta(days=1)) * (1 + 0.0001 * minute)
+
+
+def test_crypto_late_run_fills_at_the_first_bar_after_its_record_time(conn, clients):
+    """Day 1 runs 3 hours late (decisions recorded ~03:10Z); day 2 on time fetches [t_ref, t_ref + 60)
+    and both agents fill at the first bar at or after the recorded time, not at 00:15Z."""
     t = cal.crypto_times(START)
     r, _ = crypto_run(conn, START, clients, at=t.snapshot_at + timedelta(hours=3) - timedelta(minutes=1))
     assert r.late and r.minutes_late == 180 and r.decided and r.exit_code == 0
     assert conn.execute("SELECT COUNT(*) FROM decisions").fetchone()[0] == 2
+    rec = conn.execute("SELECT MAX(decided_at) FROM decisions").fetchone()[0]
+    assert rec > db.utc_ts(t.decide_at + timedelta(hours=2, minutes=50))
+    t_ref = LD.ceil_minute(cal._parse_ts(rec))
+    r2, m2 = crypto_run(conn, START + timedelta(days=1), clients)
+    assert r2.exit_code == 0 and m2.window_starts == [t_ref]
+    got = [f for f in crypto_fills(conn) if f["created_at"] == rec]
+    assert {(f["agent_id"], f["symbol"]) for f in got} == {("C0", "BTC/USD"), ("C1", "BTC/USD"), ("C1", "ETH/USD")}
+    for f in got:
+        assert f["status"] == "filled" and f["filled_at"] == db.utc_ts(t_ref)
+        assert f["reference_price"] == pytest.approx(bar_open(f["symbol"], START))
+
+
+def test_crypto_orders_share_one_t_ref_the_last_decision_record_time(conn, monkeypatch):
+    """C0 decides at 00:15Z, C1's AI reply takes 7 minutes: both agents' orders carry C1's record time
+    and fill at the same minute bar (one t_ref per day, the control included)."""
+    box, c0_recorded = {}, threading.Event()
+    record = daily._Day._record
+
+    def spy(self, aid, *a, **kw):
+        record(self, aid, *a, **kw)
+        if aid == "C0":
+            c0_recorded.set()
+
+    monkeypatch.setattr(daily._Day, "_record", spy)
+
+    class Slow(Client):
+        def complete(self, prompt, *, model):
+            assert c0_recorded.wait(10)                    # the reply comes after C0 is recorded
+            box["clock"].sleep(7 * 60 + 13)
+            return super().complete(prompt, model=model)
+
+    clients = {"C1": Slow("C1")}
+    t = cal.crypto_times(START)
+    clock = Clock(t.bars_fetch_at)
+    box["clock"] = clock
+    r = daily.run_day(conn, "crypto", START, make_deps(clock, Market(clock), clients))
+    assert r.exit_code == 0
+    dec = {row["agent_id"]: row["decided_at"] for row in conn.execute("SELECT * FROM decisions")}
+    assert dec["C0"] < dec["C1"] and cal._parse_ts(dec["C1"]) >= t.decide_at + timedelta(minutes=7)
+    created = {row["agent_id"]: row["created_at"] for row in conn.execute("SELECT * FROM orders")}
+    assert created == {"C0": dec["C1"], "C1": dec["C1"]}
+    hb = [d for j, e, d in heartbeat(conn, r.run_id) if j == "crypto_t_ref"]
+    assert hb == [{"t_ref": dec["C1"], "fill_from": db.utc_ts(LD.ceil_minute(cal._parse_ts(dec["C1"]))),
+                   "agents": ["C0", "C1"]}]
+    r2, m2 = crypto_run(conn, START + timedelta(days=1), clients)
+    assert r2.exit_code == 0 and m2.window_starts == [LD.ceil_minute(cal._parse_ts(dec["C1"]))]
+    assert len({f["filled_at"] for f in crypto_fills(conn)}) == 1
+
+
+def test_crypto_coin_with_no_bar_in_the_window_is_cancelled_and_logged(conn, clients):
+    """No ETH trade in the whole fetched window: C1's ETH order is cancelled, its BTC order fills."""
+    crypto_run(conn, START, clients)
+    clock = Clock(cal.crypto_times(START + timedelta(days=1)).bars_fetch_at)
+    market = Market(clock)
+    market.no_trades = {"ETH/USD"}
+    r = daily.run_day(conn, "crypto", START + timedelta(days=1), make_deps(clock, market, clients))
+    assert r.agents["C1"].settle == "settled"
+    f = {(x["agent_id"], x["symbol"]): x for x in crypto_fills(conn)}
+    assert f[("C1", "ETH/USD")]["status"] == "cancelled"
+    assert json.loads(f[("C1", "ETH/USD")]["detail"])["reason"] == "no_fill_bar"
+    assert f[("C1", "BTC/USD")]["status"] == "filled" and f[("C0", "BTC/USD")]["status"] == "filled"
+    hb = [d for j, e, d in heartbeat(conn, r.run_id) if j == "settle:C1"]
+    assert hb[0]["cancelled"] == ["ETH/USD"]
 
 
 def test_crypto_past_the_deadline_decides_nothing_but_settles(conn, clients):

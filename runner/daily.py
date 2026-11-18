@@ -18,6 +18,12 @@ Crypto day D (§13; starts at 00:05Z on D+1): step 0 fetches the 1-minute fill b
 D-1's decision (data/fill_prices.py), which settle_day(D) fills at; then the same steps at
 00:05Z / 00:10Z / 00:15Z, with no easy-to-borrow step (long only).
 
+Crypto decision time t_ref (§7 rule 4, v1.13): one per day, shared by every crypto agent,
+the BTC buy-and-hold control included: the time the run's last crypto decision was
+recorded (decisions.decided_at), never the scheduled 00:15Z. So the crypto orders are
+placed only after every crypto agent has decided, all with created_at = t_ref, and the
+next day's step 0 fetches the window [t_ref, t_ref + 60 min) (rounded up to the minute).
+
 Late runs (protocol v1.13). If the data step finishes after the protocol snapshot time,
 the run is late: it doesn't wait, the snapshot's cutoff is its actual build time and it
 is labelled late (minutes late in the payload and heartbeat). Agents may decide until the
@@ -92,7 +98,7 @@ class Deps:
     sleep: Callable[[float], None] = time.sleep
     # (conn, asset_class, run_id, now) -> exit code
     ingest: Callable[..., int] | None = None
-    # (conn, decision_dates, run_id, now) -> exit code
+    # (conn, decision_dates, run_id, now, window_starts) -> exit code
     fill_prices: Callable[..., int] | None = None
     # symbols -> {symbol: easy_to_borrow}
     etb: Callable[[list[str]], dict[str, bool]] | None = None
@@ -119,8 +125,8 @@ def real_deps() -> Deps:
         cr = ingest.CRYPTO_SYMBOLS if asset_class == "crypto" else ()
         return ingest.run(conn, clients, days=5, now=now, equity_symbols=eq, crypto_symbols=cr, run_id=run_id)
 
-    def do_fill_prices(conn, dates, run_id, now):
-        return fp.run(conn, clients, dates, now=now, run_id=run_id)
+    def do_fill_prices(conn, dates, run_id, now, window_starts=None):
+        return fp.run(conn, clients, dates, now=now, run_id=run_id, window_starts=window_starts)
 
     def etb(symbols):
         out = {}
@@ -219,6 +225,20 @@ def already_placed(conn: sqlite3.Connection, agent_id: str, start: datetime, end
                             AND origin IN ('decision', 'margin') AND created_at >= :s AND created_at < :e)
                OR EXISTS (SELECT 1 FROM risk_events WHERE agent_id = :a AND rule = 'margin'
                             AND occurred_at >= :s AND occurred_at < :e)""", p).fetchone()[0] == 1
+
+
+def crypto_window_starts(conn: sqlite3.Connection, agent_ids, decision_date: date) -> list[datetime]:
+    """The fill-window start(s) for decision_date's crypto orders still unfilled: ceil(t_ref) per
+    distinct created_at (one, unless a rerun placed agents at different times). [] = no orders."""
+    lo = cal.crypto_times(decision_date).decide_at
+    hi = cal.crypto_times(decision_date + timedelta(days=1)).snapshot_at
+    names = ", ".join("?" * len(agent_ids))
+    rows = conn.execute(
+        f"""SELECT DISTINCT o.created_at FROM orders AS o
+            WHERE o.agent_id IN ({names}) AND o.venue = 'ledger' AND o.created_at >= ? AND o.created_at <= ?
+              AND NOT EXISTS (SELECT 1 FROM fills AS f WHERE f.order_id = o.order_id)""",
+        [*agent_ids, db.utc_ts(lo), db.utc_ts(hi)]).fetchall()
+    return sorted({LD.ceil_minute(max(lo, cal._parse_ts(r[0]))) for r in rows})
 
 
 def applied_weights(conn: sqlite3.Connection, decision: sqlite3.Row) -> dict[str, float] | None:
@@ -322,8 +342,12 @@ class _Day:
                         date=prev.isoformat())
             elif self.deps.fill_prices is None:
                 self.hb("fetch_fill_prices", "error", error="no fill_prices dependency")
-            elif self.deps.fill_prices(self.conn, [prev], self.hb.run_id, self.deps.now) != 0:
-                self.hb.errors.append("fetch_fill_prices: failed (see its heartbeat)")
+            else:
+                starts = crypto_window_starts(self.conn, self.ids, prev) or [None]
+                for start in starts:
+                    ws = None if start is None else {prev: start}
+                    if self.deps.fill_prices(self.conn, [prev], self.hb.run_id, self.deps.now, ws) != 0:
+                        self.hb.errors.append("fetch_fill_prices: failed (see its heartbeat)")
         if done:
             self.hb("fetch_prices", "finished", skipped="snapshot stored and every agent settled")
         elif self.deps.ingest is None:
@@ -351,7 +375,8 @@ class _Day:
                                    "ORDER BY equity_id DESC LIMIT 1", (aid, self.day.isoformat())).fetchone()
             rep.equity = eq[0] if eq else None
             self.hb(f"settle:{aid}", "finished", agent_id=aid, status=res.status, fills=len(res.fills),
-                    equity=rep.equity, cash_floor_events=len(res.floor_events))
+                    equity=rep.equity, cash_floor_events=len(res.floor_events),
+                    **({"cancelled": list(res.cancelled)} if res.cancelled else {}))
         self.hb("settle", "finished", settled=sorted(settled, key=_order),
                 failed=sorted(set(self.ids) - settled, key=_order))
         return settled
@@ -458,10 +483,11 @@ class _Day:
 
         inputs = {aid: self._inputs(aid, closes, ctx0) for aid in todo + stored}
 
+        self.deferred: list[tuple[str, int, Any]] = []      # crypto: placed together at t_ref
         for aid in stored:                                     # decided in an earlier run, not placed yet
             row = final_decision(self.conn, aid, sid)
             self.report.agents[aid].decision = f"stored ({row['status']})"
-            self._place(aid, row["decision_id"], applied_weights(self.conn, row), closes, deadline)
+            self._queue_place(aid, row["decision_id"], applied_weights(self.conn, row), closes, deadline)
 
         ai_todo = [a for a in todo if a in self.ai_ids]
         pool = ThreadPoolExecutor(max_workers=max(1, len(ai_todo)), thread_name_prefix="ai")
@@ -492,6 +518,8 @@ class _Day:
                 self._record(aid, sid, dec, error, inputs[aid][2], etb, closes, deadline)
         finally:
             pool.shutdown(wait=True)
+        if self.crypto and self.deferred:
+            self._place_crypto(closes, deadline, window)
         self.report.decided = True
         self.hb("decide", "finished", decisions={a: self.report.agents[a].decision for a in todo + stored})
 
@@ -545,9 +573,33 @@ class _Day:
         self.hb(f"decide:{aid}", "error" if failed else "finished", agent_id=aid, status=status, decision_id=did,
                 attempts=rep.attempts, cost_usd=rep.cost_usd, hold=dec.weights is None, risk_events=len(events),
                 **({"error": error[:500]} if error else {"reason": f"held ({status})"} if failed else {}))
-        self._place(aid, did, weights, closes, deadline)
+        self._queue_place(aid, did, weights, closes, deadline)
 
-    def _place(self, aid, did, weights, closes, deadline) -> None:
+    def _queue_place(self, aid, did, weights, closes, deadline) -> None:
+        if self.crypto:
+            self.report.agents[aid].applied = weights
+            self.deferred.append((aid, did, weights))
+        else:
+            self._place(aid, did, weights, closes, deadline)
+
+    def _place_crypto(self, closes, deadline, window) -> None:
+        """§7 rule 4 (v1.13): every crypto agent's orders at one t_ref, the last decision's record time."""
+        names = ", ".join("?" * len(self.deferred))
+        last = self.conn.execute(f"SELECT MAX(decided_at) FROM decisions WHERE decision_id IN ({names})",
+                                 [did for _, did, _ in self.deferred]).fetchone()[0]
+        t_ref = cal._parse_ts(last)
+        earlier = [r[0] for r in self.conn.execute(
+            f"""SELECT DISTINCT created_at FROM orders WHERE venue = 'ledger' AND agent_id IN
+                ({", ".join("?" * len(self.ids))}) AND created_at >= ? AND created_at < ? AND created_at <> ?""",
+            [*self.ids, db.utc_ts(window[0]), db.utc_ts(window[1]), last])]
+        self.hb("crypto_t_ref", "error" if earlier else "finished", t_ref=last,
+                fill_from=db.utc_ts(LD.ceil_minute(t_ref)), agents=[a for a, _, _ in self.deferred],
+                **({"other_t_refs_today": earlier,
+                    "note": "an earlier run placed other crypto agents at a different time"} if earlier else {}))
+        for aid, did, weights in self.deferred:
+            self._place(aid, did, weights, closes, deadline, created_at=t_ref)
+
+    def _place(self, aid, did, weights, closes, deadline, created_at: datetime | None = None) -> None:
         rep = self.report.agents[aid]
         rep.applied = weights
         if self.deps.now() > deadline:
@@ -555,12 +607,16 @@ class _Day:
             self.hb(f"place_orders:{aid}", "error", agent_id=aid, reason="past the deadline: nothing placed")
             return
         try:
-            placed = LD.place_orders(self.conn, aid, self.day, closes, weights, self.deps.now(),
+            placed = LD.place_orders(self.conn, aid, self.day, closes, weights, created_at or self.deps.now(),
                                      did if weights is not None else None)
         except Exception as exc:  # noqa: BLE001
             self.hb(f"place_orders:{aid}", "error", agent_id=aid, error=_err(exc))
             return
         rep.placed, rep.orders = placed.status, placed.orders
+        if placed.status == "missed":
+            self.hb(f"place_orders:{aid}", "error", agent_id=aid, status="missed", late=True,
+                    reason="decided after the next day's snapshot cutoff: no trade (§7 rule 4, v1.13)")
+            return
         self.hb(f"place_orders:{aid}", "finished", agent_id=aid, status=placed.status, orders=len(placed.orders),
                 margin_events=len(placed.margin_events), margin_superseded=placed.margin_superseded)
 
