@@ -15,7 +15,7 @@ AlphaLab is a research project that runs AI trading agents against Alpaca **pape
 | `research/universe/` | Frozen universe (`universe.csv`) + holdings evidence |
 | `data/db.py` | SQLite schema setup (`schema.sql`) and connections; append-only triggers |
 | `data/ingest.py` | Daily Alpaca bars into versioned `prices` rows; never stores unclosed bars |
-| `data/fill_prices.py` | Crypto 1-minute fill bars (00:15Z–01:15Z after each decision) into `crypto_fill_bars`; closed bars only, never in a snapshot |
+| `data/fill_prices.py` | Crypto 1-minute fill bars for the hour [t_ref, t_ref+60 min) after each day's crypto decision time into `crypto_fill_bars`, plus `crypto_fill_windows` once the hour is fetched in full; closed bars only, never in a snapshot |
 | `data/calendar.py` | NYSE trading days, closes, daily run times (all UTC) |
 | `data/checks.py` | Data checks on stored bars, run after every ingest |
 | `data/snapshot.py` | Point-in-time daily snapshot: the only data an agent sees |
@@ -33,7 +33,8 @@ AlphaLab is a research project that runs AI trading agents against Alpaca **pape
 | `agents/openrouter.py` | `OpenRouterClient`: pinned endpoints, no fallbacks, error mapping, key never logged |
 | `runner/daily.py` | `python -m runner.daily equity\|crypto --experiment NAME [--date D]`: one trading day in protocol order (ingest → settle → snapshot → decide → risk → orders), restart-safe, heartbeat per step, late runs (v1.13) |
 | `runner/experiment.py`, `runner/roster.py` | One DB file per experiment (`data/<name>.db`, labelled; `create` copies market data, empty ledger); which agents run and how they're built |
-| `agents/prompts/`, `analysis/`, `dashboard/` | Not built yet (prompts Sat 5 Dec) |
+| `analysis/results.py` | Results report per agent from an experiment DB: returns, late and missed days, `--exclude-late` (§10) |
+| `agents/prompts/`, `dashboard/` | Not built yet (prompts Sat 5 Dec) |
 
 ## Working here
 
