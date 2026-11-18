@@ -101,6 +101,7 @@ def populated(conn):
         (fetch,),
     )
     add_fill_bar(conn)
+    conn.execute("INSERT INTO experiment (name, start_date) VALUES ('shakedown', '2026-12-14')")
     conn.commit()
     return conn
 
@@ -362,3 +363,15 @@ def test_init_db_adds_fill_bars_to_an_old_database(tmp_path):
     c = db.init_db(path)
     assert c.execute("SELECT COUNT(*) FROM crypto_fill_bars").fetchone()[0] == 0
     c.close()
+
+
+def test_one_experiment_label_per_database(conn):
+    conn.execute("INSERT INTO experiment (name, start_date) VALUES ('official', '2027-01-11')")
+    with pytest.raises(sqlite3.IntegrityError, match="already has its experiment label"):
+        conn.execute("INSERT INTO experiment (name, start_date) VALUES ('shakedown', '2026-12-14')")
+
+
+@pytest.mark.parametrize("name", ["Official", "", "1x", "a b", "dev;drop"])
+def test_bad_experiment_name_rejected(conn, name):
+    with pytest.raises(sqlite3.IntegrityError):
+        conn.execute("INSERT INTO experiment (name, start_date) VALUES (?, '2027-01-11')", (name,))

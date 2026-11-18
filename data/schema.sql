@@ -345,8 +345,31 @@ CREATE TABLE IF NOT EXISTS crypto_fill_bars (
 CREATE INDEX IF NOT EXISTS ix_crypto_fill_bars ON crypto_fill_bars (symbol, bar_ts);
 
 -- ---------------------------------------------------------------------------
+-- experiment: the label of this database file (protocol §9, v1.13)
+-- ---------------------------------------------------------------------------
+-- One database file per experiment (shakedown, official, or a dev copy). The
+-- single row names it and its first decision day; the daily runner refuses a
+-- file without it, or a date before start_date. Written by runner/experiment.py.
+CREATE TABLE IF NOT EXISTS experiment (
+    experiment_id  INTEGER PRIMARY KEY,
+    name           TEXT NOT NULL CHECK (name GLOB '[a-z]*' AND name NOT GLOB '*[^a-z0-9_-]*'),
+    start_date     TEXT NOT NULL CHECK (start_date GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]'),
+    source         TEXT,                            -- where the market data was copied from
+    created_at     TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+                   CHECK (created_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9]Z')
+);
+
+-- ---------------------------------------------------------------------------
 -- Integrity triggers
 -- ---------------------------------------------------------------------------
+
+-- A database file holds one experiment.
+CREATE TRIGGER IF NOT EXISTS experiment_single_row
+BEFORE INSERT ON experiment
+WHEN (SELECT COUNT(*) FROM experiment) > 0
+BEGIN
+    SELECT RAISE(ABORT, 'this database already has its experiment label');
+END;
 
 -- No future data (CLAUDE.md rule 1): a decision can't predate its snapshot's cutoff.
 CREATE TRIGGER IF NOT EXISTS decisions_not_before_cutoff
@@ -392,3 +415,5 @@ CREATE TRIGGER IF NOT EXISTS market_sessions_no_update  BEFORE UPDATE ON market_
 CREATE TRIGGER IF NOT EXISTS market_sessions_no_delete  BEFORE DELETE ON market_sessions  BEGIN SELECT RAISE(ABORT, 'market_sessions is append-only (CLAUDE.md rule 2)'); END;
 CREATE TRIGGER IF NOT EXISTS crypto_fill_bars_no_update BEFORE UPDATE ON crypto_fill_bars BEGIN SELECT RAISE(ABORT, 'crypto_fill_bars is append-only (CLAUDE.md rule 2)'); END;
 CREATE TRIGGER IF NOT EXISTS crypto_fill_bars_no_delete BEFORE DELETE ON crypto_fill_bars BEGIN SELECT RAISE(ABORT, 'crypto_fill_bars is append-only (CLAUDE.md rule 2)'); END;
+CREATE TRIGGER IF NOT EXISTS experiment_no_update       BEFORE UPDATE ON experiment       BEGIN SELECT RAISE(ABORT, 'experiment is append-only (CLAUDE.md rule 2)'); END;
+CREATE TRIGGER IF NOT EXISTS experiment_no_delete       BEFORE DELETE ON experiment       BEGIN SELECT RAISE(ABORT, 'experiment is append-only (CLAUDE.md rule 2)'); END;

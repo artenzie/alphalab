@@ -34,6 +34,7 @@ APPEND_ONLY_TABLES = (
     "calendar_fetches",
     "market_sessions",
     "crypto_fill_bars",
+    "experiment",
 )
 ALL_TABLES = ("agents",) + APPEND_ONLY_TABLES
 
