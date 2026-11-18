@@ -14,7 +14,7 @@ from data import db  # noqa: E402
 from execution import ledger as L  # noqa: E402
 from execution import ledger_db as LD  # noqa: E402
 from runner import experiment as ex  # noqa: E402
-from test_schema import add_fill_bar  # noqa: E402
+from test_schema import add_fill_bar, add_fill_window  # noqa: E402
 from test_snapshot import close_of, make_db  # noqa: E402
 
 MON = date(2026, 11, 16)
@@ -26,6 +26,7 @@ def source(tmp_path):
     c = make_db(path, eq_end=MON, cr_end=MON)
     with c:
         add_fill_bar(c)
+        add_fill_window(c)
     c.close()
     return path
 

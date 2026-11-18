@@ -223,17 +223,6 @@ def test_restart_safety_and_next_decision_waits(conn):
     assert settle(conn, "C0", WED).fills == () and len(fills(conn)) == n
 
 
-def test_orders_after_the_day_close_wait_for_the_next_day(conn):
-    """Orders written after day's close (the decision on day) are not filled by settle(day)."""
-    add(conn, BTC, MON, 65000.0)
-    settle(conn, "C1", MON)
-    late = cal.crypto_times(TUE).close + timedelta(minutes=15)       # 00:15Z on WED: TUE's decision time
-    place(conn, "C1", MON, {BTC: 65000.0}, {BTC: 0.4}, created_at=late)
-    add(conn, BTC, TUE, 66000.0)
-    res = settle(conn, "C1", TUE, now=late + timedelta(hours=1))
-    assert res.fills == () and LD.pending_orders(conn, "C1")
-
-
 def test_crypto_has_no_delisting(conn):
     with pytest.raises(L.LedgerError, match="delisting"):
         LD.settle_day(conn, "C0", MON, settled_by(MON), delisted={BTC: 1.0})
@@ -251,3 +240,146 @@ def test_snapshot_never_sees_the_fill_bars(conn):
     after = build_snapshot(conn, "crypto", MON, "live", now=now, symbols=[BTC])
     assert after.sha256 == before.sha256 and after.history_sha256 == before.history_sha256
     assert before.payload["symbols"][BTC]["last_close"] == 62900.0
+
+
+# ---------------------------------------------------------------------------
+# v1.13: the fill window follows the actual decision time (late runs)
+# ---------------------------------------------------------------------------
+
+GOLDEN = ROOT / "tests" / "fixtures" / "crypto_on_time_settle_v1_12.json"
+
+
+def minute_bar(conn, sym, decision_date, ts, open_, window_start, fetched_at=None):
+    """A minute bar stored by a fetch of the window starting at window_start."""
+    with conn:
+        return conn.execute(
+            """INSERT INTO crypto_fill_bars (symbol, decision_date, window_start, bar_ts, open, high, low, close,
+                   volume, feed, fetched_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1.0, 'crypto', ?)""",
+            (sym, decision_date.isoformat(), db.utc_ts(window_start), db.utc_ts(ts), open_, open_ * 1.001,
+             open_ * 0.999, open_, db.utc_ts(fetched_at or window_start + timedelta(hours=1, minutes=5)))).lastrowid
+
+
+def window_fetched(conn, decision_date, start, fetched_at=None, symbols=(BTC, ETH)):
+    """fill_prices' record that the whole window [start, start + 60 min) was fetched after it closed."""
+    with conn:
+        conn.execute("INSERT INTO crypto_fill_windows (decision_date, window_start, window_end, symbols, fetched_at) "
+                     "VALUES (?, ?, ?, ?, ?)",
+                     (decision_date.isoformat(), db.utc_ts(start), db.utc_ts(start + timedelta(minutes=60)),
+                      json.dumps(list(symbols)), db.utc_ts(fetched_at or start + timedelta(minutes=65))))
+
+
+def on_time_scenario(conn):
+    """C0 and C1 decide on MON, both orders written at one shared record time 00:15:41Z (on time)."""
+    for aid in ("C0", "C1"):
+        if aid == "C0":
+            add(conn, BTC, MON, 65000.0)
+        settle(conn, aid, MON)
+    t = decide_at(MON) + timedelta(seconds=41)
+    place(conn, "C0", MON, {BTC: 65000.0}, {BTC: 1.0}, t)
+    place(conn, "C1", MON, {BTC: 65000.0, ETH: 3000.0}, {BTC: 0.3, ETH: 0.2}, t)
+    for m, p in ((0, 65010.0), (1, 65100.0), (2, 65200.0)):
+        fill_bar(conn, BTC, MON, m, p)
+    for m, p in ((1, 3001.0), (2, 3002.0)):
+        fill_bar(conn, ETH, MON, m, p)
+    add(conn, BTC, TUE, 66000.0)
+    add(conn, ETH, TUE, 3100.0)
+    for aid in ("C0", "C1"):
+        settle(conn, aid, TUE)
+    return {t: [{k: r[k] for k in r.keys() if k != "recorded_at"} for r in conn.execute(f"SELECT * FROM {t} ORDER BY rowid")]
+            for t in ("orders", "fills", "positions", "equity", "risk_events")}
+
+
+def test_on_time_run_settles_exactly_as_before_v1_13(conn):
+    """Regression: every ledger row of an on-time day equals the output of the v1.12 ledger (fixture
+    captured from it before the change)."""
+    assert on_time_scenario(conn) == json.loads(GOLDEN.read_text())
+
+
+def test_late_decision_fills_at_the_first_bar_at_or_after_its_record_time(conn):
+    """MON's decision recorded at 03:09:20Z TUE (late): fills at the 03:10 bar of the late window,
+    never at the on-time window's 00:15 bar or at the 03:09 bar before the decision."""
+    rec = decide_at(MON) + timedelta(hours=2, minutes=54, seconds=20)          # 03:09:20Z
+    t_ref = LD.ceil_minute(rec)                                                # 03:10Z
+    c0_buys_on_monday(conn, agent="C1", weight=0.4, created_at=rec)
+    fill_bar(conn, BTC, MON, 0, 60000.0)                                       # on-time window: not used
+    minute_bar(conn, BTC, MON, t_ref - timedelta(minutes=1), 61000.0, t_ref - timedelta(minutes=1))
+    bid = minute_bar(conn, BTC, MON, t_ref, 65300.0, t_ref)
+    minute_bar(conn, BTC, MON, t_ref + timedelta(minutes=1), 69000.0, t_ref)
+    add(conn, BTC, TUE, 66000.0)
+    res = settle(conn, "C1", TUE)
+    assert res.fills[0].reference_price == 65300.0
+    row = fills(conn)[0]
+    assert row["filled_at"] == "2026-11-17T03:10:00.000Z" and json.loads(row["detail"])["fill_bar_id"] == bid
+    assert row["filled_at"] >= conn.execute("SELECT created_at FROM orders").fetchone()[0]
+
+
+def test_late_window_runs_to_t_ref_plus_60_minutes(conn):
+    """The first bar of a late window may be 50 minutes in: past 01:15Z, still inside [t_ref, t_ref + 60)."""
+    rec = decide_at(MON) + timedelta(hours=3)                                  # 03:15:00Z, a whole minute
+    c0_buys_on_monday(conn, agent="C1", weight=0.4, created_at=rec)
+    minute_bar(conn, BTC, MON, rec + timedelta(minutes=50), 65400.0, rec)
+    add(conn, BTC, TUE, 66000.0)
+    assert settle(conn, "C1", TUE).fills[0].reference_price == 65400.0
+
+
+def test_no_bar_in_a_fetched_window_cancels_that_order_and_logs_it(conn):
+    """BTC has no minute bar in [t_ref, t_ref + 60) after the whole window was fetched: its order is
+    cancelled (reason no_fill_bar) while ETH fills; the day still marks."""
+    rec = decide_at(MON) + timedelta(hours=2, minutes=54, seconds=20)
+    t_ref = LD.ceil_minute(rec)
+    add(conn, BTC, MON, 65000.0)
+    add(conn, ETH, MON, 3000.0)
+    settle(conn, "C1", MON)
+    place(conn, "C1", MON, {BTC: 65000.0, ETH: 3000.0}, {BTC: 0.3, ETH: 0.2}, rec)
+    minute_bar(conn, BTC, MON, t_ref + timedelta(minutes=60), 65000.0, t_ref + timedelta(minutes=60))  # just after
+    minute_bar(conn, ETH, MON, t_ref + timedelta(minutes=3), 3010.0, t_ref)
+    window_fetched(conn, MON, t_ref)
+    add(conn, BTC, TUE, 66000.0)
+    add(conn, ETH, TUE, 3100.0)
+    res = settle(conn, "C1", TUE)
+    assert [f.symbol for f in res.fills] == [ETH] and res.cancelled == (BTC,)
+    rows = conn.execute("SELECT f.*, o.symbol FROM fills f JOIN orders o USING (order_id) ORDER BY fill_id").fetchall()
+    btc = next(r for r in rows if r["symbol"] == BTC)
+    assert btc["status"] == "cancelled" and btc["filled_at"] == db.utc_ts(t_ref)
+    detail = json.loads(btc["detail"])
+    assert detail["reason"] == "no_fill_bar" and detail["window_start"] == db.utc_ts(t_ref)
+    assert not LD.pending_orders(conn, "C1")
+    acct = LD.load_account(conn, "C1", as_of=TUE)
+    assert BTC not in acct.positions and acct.shares(ETH) > 0
+
+
+def test_no_bar_before_the_window_is_fully_fetched_waits_instead_of_cancelling(conn):
+    """Without fill_prices' record of the closed window (or before it was written), a missing bar may
+    still arrive: PriceNotAvailable, nothing written."""
+    rec = decide_at(MON) + timedelta(hours=3)
+    c0_buys_on_monday(conn, agent="C1", weight=0.4, created_at=rec)
+    add(conn, BTC, TUE, 66000.0)
+    with pytest.raises(LD.PriceNotAvailable, match="minute bar"):
+        settle(conn, "C1", TUE)
+    window_fetched(conn, MON, rec, fetched_at=settled_by(TUE, minutes=30))
+    with pytest.raises(LD.PriceNotAvailable):
+        settle(conn, "C1", TUE, now=settled_by(TUE, minutes=29))            # the record isn't known yet
+    assert not fills(conn)
+    assert settle(conn, "C1", TUE, now=settled_by(TUE, minutes=31)).cancelled == (BTC,)
+
+
+def test_a_window_record_for_another_start_does_not_cancel(conn):
+    """The on-time window [00:15, 01:15) was fetched; a decision recorded at 03:15Z needs its own window."""
+    rec = decide_at(MON) + timedelta(hours=3)
+    c0_buys_on_monday(conn, agent="C1", weight=0.4, created_at=rec)
+    window_fetched(conn, MON, decide_at(MON))
+    add(conn, BTC, TUE, 66000.0)
+    with pytest.raises(LD.PriceNotAvailable):
+        settle(conn, "C1", TUE)
+
+
+def test_decision_after_the_next_days_snapshot_cutoff_is_missed(conn):
+    """Max lateness: MON's orders written after TUE's snapshot cutoff (00:10Z WED) are not placed."""
+    add(conn, BTC, MON, 65000.0)
+    settle(conn, "C1", MON)
+    cutoff = cal.crypto_times(TUE).snapshot_at
+    placed = place(conn, "C1", MON, {BTC: 65000.0}, {BTC: 0.4}, created_at=cutoff + timedelta(milliseconds=1))
+    assert placed.status == "missed" and placed.orders == () and not LD.pending_orders(conn, "C1")
+    ok = place(conn, "C0", MON, {BTC: 65000.0}, {BTC: 1.0}, created_at=cutoff - timedelta(hours=1)) \
+        if settle(conn, "C0", MON) else None
+    assert ok.status == "placed"

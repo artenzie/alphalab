@@ -1,10 +1,17 @@
-"""Crypto fill prices (protocol §7 rule 4, v1.12): closed 1-minute bars after each crypto decision.
+"""Crypto fill prices (protocol §7 rule 4, v1.13): closed 1-minute bars after each crypto decision.
 
 For a crypto decision on the daily bar of D (decided at 00:15Z on D+1, §13),
 the ledger fills at the open of the first 1-minute bar starting at or after
-the decision time. This module fetches the 1-minute bars of the five coins in
-the window [00:15Z, 01:15Z) on D+1 and stores them in `crypto_fill_bars`, a
-table of its own: no snapshot reads it, so no agent ever sees these prices.
+the decision time t_ref. This module fetches the 1-minute bars of the five
+coins in the window [t_ref, t_ref + 60 min) and stores them in
+`crypto_fill_bars`, a table of its own: no snapshot reads it, so no agent ever
+sees these prices. t_ref is the day's crypto decision time, a whole minute,
+passed by the runner (window_starts); without it the window starts at 00:15Z
+on D+1, the earliest possible t_ref. A late decision (v1.13) has a later window.
+
+Once every minute of a window has closed, a fetch also writes a
+`crypto_fill_windows` row: the ledger's evidence that a coin with no bar in it
+had none, so its order is cancelled rather than waiting.
 
 Rules, the same as the daily ingest's:
   * only closed bars: a minute bar starting at T is stored once now >= T + 1 min
@@ -35,7 +42,7 @@ import sys
 import time
 import uuid
 from datetime import date, datetime, timedelta, timezone
-from typing import Any, Callable, Iterable
+from typing import Any, Callable, Iterable, Mapping
 
 from data import calendar as cal
 from data import db
@@ -50,10 +57,20 @@ VALUE_FIELDS = ("open", "high", "low", "close", "volume", "vwap", "trade_count")
 FEED = "crypto"
 
 
-def window(decision_date: date) -> tuple[datetime, datetime]:
-    """[start, end) of the minute bars after decision_date's decision: 00:15Z .. 01:15Z on D+1."""
-    start = cal.crypto_times(decision_date).decide_at
-    return start, start + WINDOW
+def window(decision_date: date, t_ref: datetime | None = None) -> tuple[datetime, datetime]:
+    """[start, end) of the minute bars after decision_date's decision: [t_ref, t_ref + 60 min).
+
+    t_ref defaults to the scheduled decision time, 00:15Z on D+1 (the window of an
+    on-time day that has no orders, or of a backfill)."""
+    earliest = cal.crypto_times(decision_date).decide_at
+    if t_ref is None:
+        return earliest, earliest + WINDOW
+    t_ref = as_utc(t_ref)
+    if t_ref.second or t_ref.microsecond:
+        raise ValueError(f"window start {t_ref.isoformat()} is not a whole minute")
+    if t_ref < earliest:
+        raise ValueError(f"window start {t_ref.isoformat()} is before the decision time {earliest.isoformat()}")
+    return t_ref, t_ref + WINDOW
 
 
 def minute_bar_closed(bar_ts: datetime, now: datetime) -> bool:
@@ -84,9 +101,10 @@ def faults(row: dict) -> list[str]:
     return out
 
 
-def build_rows(bars: dict[str, list[Any]], decision_date: date, now: datetime, stats: dict) -> list[dict]:
+def build_rows(bars: dict[str, list[Any]], decision_date: date, now: datetime, stats: dict,
+               t_ref: datetime | None = None) -> list[dict]:
     """Closed bars inside the window, as crypto_fill_bars rows. Raises IngestError on a bad bar."""
-    start, end = window(decision_date)
+    start, end = window(decision_date, t_ref)
     rows = []
     for sym in sorted(bars):
         s = stats.setdefault(sym, {"fetched": 0, "inserted": 0, "unchanged": 0, "rejected_unclosed": 0,
@@ -134,8 +152,9 @@ def store(conn: sqlite3.Connection, rows: list[dict], fetched_at: str, stats: di
     return n
 
 
-def first_bars(conn: sqlite3.Connection, decision_date: date, symbols) -> dict[str, str | None]:
-    start, end = window(decision_date)
+def first_bars(conn: sqlite3.Connection, decision_date: date, symbols,
+               t_ref: datetime | None = None) -> dict[str, str | None]:
+    start, end = window(decision_date, t_ref)
     out = {}
     for sym in symbols:
         r = conn.execute("SELECT MIN(bar_ts) FROM crypto_fill_bars WHERE symbol = ? AND bar_ts >= ? AND bar_ts < ?",
@@ -144,10 +163,10 @@ def first_bars(conn: sqlite3.Connection, decision_date: date, symbols) -> dict[s
     return out
 
 
-def warnings_for(conn, decision_date: date, symbols) -> list[str]:
-    start, _ = window(decision_date)
+def warnings_for(conn, decision_date: date, symbols, t_ref: datetime | None = None) -> list[str]:
+    start, _ = window(decision_date, t_ref)
     out = []
-    for sym, first in first_bars(conn, decision_date, symbols).items():
+    for sym, first in first_bars(conn, decision_date, symbols, t_ref).items():
         if first is None:
             out.append(f"{sym} {decision_date}: no minute bar stored yet")
         elif cal._parse_ts(first) - start > LATE_FIRST_BAR:
@@ -162,33 +181,56 @@ def _heartbeat(conn, run_id: str, event: str, detail: dict) -> None:
                      (run_id, JOB, event, db.utc_ts(), json.dumps(detail, sort_keys=True)))
 
 
+def record_window(conn: sqlite3.Connection, decision_date: date, start: datetime, end: datetime, symbols,
+                  fetched_at: str, run_id: str) -> None:
+    """The whole window was fetched after its last minute closed (crypto_fill_windows)."""
+    with conn:
+        conn.execute("INSERT INTO crypto_fill_windows (decision_date, window_start, window_end, symbols, fetched_at, "
+                     "run_id) VALUES (?, ?, ?, ?, ?, ?)",
+                     (decision_date.isoformat(), db.utc_ts(start), db.utc_ts(end), json.dumps(sorted(symbols)),
+                      fetched_at, run_id))
+
+
 def run(conn: sqlite3.Connection, clients: Clients, decision_dates: Iterable[date],
         now: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
         sleep: Callable[[float], None] = time.sleep, symbols=CRYPTO_SYMBOLS,
-        run_id: str | None = None) -> int:
-    """Fetch and store the windows after decision_dates. Returns an exit code (0 ok, 1 error)."""
+        run_id: str | None = None, window_starts: Mapping[date, datetime] | None = None) -> int:
+    """Fetch and store the windows after decision_dates. Returns an exit code (0 ok, 1 error).
+
+    window_starts: decision date -> that day's t_ref (whole minute); default 00:15Z on D+1."""
     run_id = run_id or uuid.uuid4().hex
     dates = sorted(set(decision_dates))
-    _heartbeat(conn, run_id, "started", {"dates": [d.isoformat() for d in dates], "symbols": list(symbols)})
+    starts = dict(window_starts or {})
+    _heartbeat(conn, run_id, "started", {"dates": [d.isoformat() for d in dates], "symbols": list(symbols),
+                                         "window_starts": {d.isoformat(): db.utc_ts(t) for d, t in starts.items()}})
     stats: dict[str, dict] = {}
     per_date, warnings = {}, []
     try:
         if not dates:
             raise IngestError("no decision dates given")
         for d in dates:
-            start, end = window(d)
+            try:
+                start, end = window(d, starts.get(d))
+            except ValueError as exc:
+                raise IngestError(f"{d}: {exc}") from None
             if now() < start + MINUTE:
                 raise IngestError(f"{d}: no minute of the window {db.utc_ts(start)} has closed yet")
+            asked_at = now()                         # the request is made after the window closed, or not
             bars = fetch_minutes(clients, symbols, start, end, sleep)
             day_stats: dict[str, dict] = {}
-            rows = build_rows(bars, d, now(), day_stats)
-            n = store(conn, rows, db.utc_ts(now()), day_stats)
+            rows = build_rows(bars, d, now(), day_stats, start)
+            fetched_at = db.utc_ts(now())
+            n = store(conn, rows, fetched_at, day_stats)
+            complete = asked_at >= end
+            if complete:
+                record_window(conn, d, start, end, symbols, fetched_at, run_id)
             for sym, s in day_stats.items():
                 tot = stats.setdefault(sym, {k: 0 for k in s})
                 for k, v in s.items():
                     tot[k] += v
-            per_date[d.isoformat()] = {"closed_bars": len(rows), "inserted": n}
-            warnings += warnings_for(conn, d, symbols)
+            per_date[d.isoformat()] = {"closed_bars": len(rows), "inserted": n, "window_start": db.utc_ts(start),
+                                       "complete": complete}
+            warnings += warnings_for(conn, d, symbols, start)
     except Exception as exc:  # noqa: BLE001 - every failure becomes an error heartbeat
         err = str(exc) if isinstance(exc, IngestError) else describe(exc)
         _heartbeat(conn, run_id, "error", {"error": err, "per_date": per_date})

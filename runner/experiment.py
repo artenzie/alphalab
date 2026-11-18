@@ -6,7 +6,7 @@
 
 A new experiment file gets the schema, its label (the single `experiment`
 row: name, start date, source) and a copy of the market data from an existing
-database: prices, the calendar cache and the crypto fill bars, with their ids
+database: prices, the calendar cache and the crypto fill bars (and fetched windows), with their ids
 and fetched_at unchanged, so point-in-time reads give the same answers. It
 gets no ledger rows, so every agent starts at START_CASH ($100,000) on the
 start date. The source is opened read-only and never changed; an existing
@@ -32,7 +32,7 @@ OFFICIAL = "official"
 SHAKEDOWN = "shakedown"
 OFFICIAL_START = date(2027, 1, 11)          # D3
 SHAKEDOWN_START = date(2026, 12, 14)
-MARKET_TABLES = ("calendar_fetches", "market_sessions", "prices", "crypto_fill_bars")   # FK order
+MARKET_TABLES = ("calendar_fetches", "market_sessions", "prices", "crypto_fill_bars", "crypto_fill_windows")   # FK order
 
 
 class ExperimentError(Exception):

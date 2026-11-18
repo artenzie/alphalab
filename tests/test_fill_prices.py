@@ -139,3 +139,48 @@ def test_caller_run_id(conn):
     assert fp.run(conn, clients(data), [D], now=lambda: W0 + timedelta(minutes=5), sleep=lambda s: None,
                   symbols=["BTC/USD"], run_id="runner-2") == 0
     assert {r[0] for r in conn.execute("SELECT run_id FROM heartbeat")} == {"runner-2"}
+
+
+# --- v1.13: the window starts at the day's crypto decision time (t_ref) -------
+
+T_REF = datetime(2026, 11, 17, 3, 10, tzinfo=UTC)        # a late decision recorded at 03:09:20Z
+
+
+def windows(conn):
+    return conn.execute("SELECT * FROM crypto_fill_windows ORDER BY window_id").fetchall()
+
+
+def test_window_starts_at_t_ref_when_given():
+    assert fp.window(D, T_REF) == (T_REF, T_REF + timedelta(hours=1))
+    with pytest.raises(ValueError, match="whole minute"):
+        fp.window(D, T_REF + timedelta(seconds=20))
+    with pytest.raises(ValueError, match="before"):
+        fp.window(D, W0 - timedelta(minutes=1))
+
+
+def test_late_window_is_fetched_and_stored_from_t_ref(conn):
+    data = {"BTC/USD": [bar(T_REF + timedelta(minutes=m), close=65000.0 + m) for m in (-1, 0, 1, 59, 60)]}
+    c = clients(data)
+    now = T_REF + timedelta(hours=2)
+    assert fp.run(conn, c, [D], now=lambda: now, sleep=lambda s: None, symbols=["BTC/USD"],
+                  window_starts={D: T_REF}) == 0
+    req = c.crypto.requests[0]
+    start = req.start.replace(tzinfo=UTC) if req.start.tzinfo is None else req.start
+    assert start == T_REF
+    got = rows(conn)
+    assert [r["bar_ts"] for r in got] == ["2026-11-17T03:10:00.000Z", "2026-11-17T03:11:00.000Z",
+                                          "2026-11-17T04:09:00.000Z"]
+    assert {r["window_start"] for r in got} == {"2026-11-17T03:10:00.000Z"}
+    assert heartbeats(conn)[-1][1]["per_date"][D.isoformat()]["window_start"] == "2026-11-17T03:10:00.000Z"
+
+
+def test_a_window_is_recorded_only_once_fully_closed(conn):
+    data = {"BTC/USD": minutes(0, 1), "XRP/USD": []}
+    assert run(conn, data, W0 + timedelta(minutes=30)) == 0
+    assert windows(conn) == []                                         # still open: no evidence yet
+    assert run(conn, data, W0 + timedelta(hours=1)) == 0
+    w = windows(conn)
+    assert len(w) == 1 and (w[0]["window_start"], w[0]["window_end"]) == (db.utc_ts(W0),
+                                                                          db.utc_ts(W0 + timedelta(hours=1)))
+    assert json.loads(w[0]["symbols"]) == ["BTC/USD", "XRP/USD"] and w[0]["run_id"]
+    assert heartbeats(conn)[-1][1]["per_date"][D.isoformat()]["complete"] is True

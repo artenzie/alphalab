@@ -29,15 +29,21 @@ Modes:
             ledger for a manual correction (rule 11) rather than sizing across it.
   backtest  split-adjusted open/close, matching backtest snapshots; no split guard.
 
-Crypto (C0, C1; §7 rule 4, v1.12). Every calendar day is a settle day: day
+Crypto (C0, C1; §7 rule 4, v1.13). Every calendar day is a settle day: day
 D+1 fills decision D's orders and marks at D+1's daily close (00:00Z on D+2).
-Pending orders are those created before that close. They fill at the open of
-the first 1-minute bar (crypto_fill_bars) starting at or after t_ref = the later
-of 00:15Z on D+1 and the orders' created_at, rounded up to the whole minute,
-so a fill is never earlier than its order; plus 5 bps and the 0.25% fee
+Pending orders are those created by D+1's snapshot cutoff (00:10Z on D+2), the
+latest a decision D may be placed (place_orders returns 'missed' after it).
+They fill at the open of the first 1-minute bar (crypto_fill_bars) in
+[t_ref, t_ref + 60 min), t_ref = the later of 00:15Z on D+1 and the orders'
+created_at (the time the day's last crypto decision was recorded, shared by
+every crypto agent: runner/daily.py), rounded up to the whole minute, so a fill
+is never earlier than its order; plus 5 bps and the 0.25% fee
 (ledger.CRYPTO_FEE), the cash floor included. The bar must have closed by
 `now` and been fetched by `now` (rule 11); filled_at is its bar_ts and the
-fill detail names its fill_bar_id. No split guard or delisting for crypto.
+fill detail names its fill_bar_id. A coin with no bar in the window is
+cancelled ('no_fill_bar', filled_at = t_ref) once crypto_fill_windows shows the
+whole window was fetched after it closed; until then PriceNotAvailable. No split
+guard or delisting for crypto.
 
 Cash floor (rule 12): for agents with ledger.has_cash_floor, the pending
 orders go through ledger.cash_floor before filling: sells first, buys scaled
@@ -83,7 +89,7 @@ class SplitDetected(LedgerError):
 class DayResult:
     status: str                       # 'settled' | 'already_settled'
     fills: tuple[L.Fill, ...] = ()
-    cancelled: tuple[str, ...] = ()   # symbols whose pending orders were cancelled (delisted)
+    cancelled: tuple[str, ...] = ()   # symbols whose pending orders were cancelled (delisted; crypto no_fill_bar)
     mark: L.Mark | None = None
     borrow: float = 0.0
     interest: float = 0.0
@@ -92,7 +98,7 @@ class DayResult:
 
 @dataclass(frozen=True)
 class Placed:
-    status: str                       # 'placed' | 'already_placed'
+    status: str                       # 'placed' | 'already_placed' | 'missed' (crypto, too late: nothing written)
     orders: tuple[Order, ...] = ()
     order_ids: tuple[int, ...] = ()
     margin_events: tuple[dict, ...] = ()
@@ -164,6 +170,16 @@ def ceil_minute(ts: datetime) -> datetime:
     """ts rounded up to the next whole minute (unchanged if already whole)."""
     floor = ts.replace(second=0, microsecond=0)
     return floor if floor == ts else floor + MINUTE
+
+
+def fetched_window(conn: sqlite3.Connection, symbol: str, t_ref: datetime, now: datetime) -> sqlite3.Row | None:
+    """fill_prices' record, known at now, that [t_ref, t_ref + WINDOW) was fetched in full for symbol."""
+    return conn.execute(
+        """SELECT w.* FROM crypto_fill_windows AS w
+           WHERE w.window_start <= :ref AND w.window_end >= :end AND w.fetched_at <= :now
+             AND EXISTS (SELECT 1 FROM json_each(w.symbols) WHERE value = :s)
+           ORDER BY w.fetched_at, w.window_id LIMIT 1""",
+        {"ref": db.utc_ts(t_ref), "end": db.utc_ts(t_ref + WINDOW), "now": db.utc_ts(now), "s": symbol}).fetchone()
 
 
 def fill_bars(conn: sqlite3.Connection, symbols: list[str], t_ref: datetime, now: datetime,
@@ -275,11 +291,12 @@ def settle_day(conn: sqlite3.Connection, agent_id: str, day: date, now: datetime
             return DayResult("already_settled")
 
         account = load_account(conn, agent_id, before=day)
-        # Equity: orders written by the open. Crypto: orders written before the day's close
-        # (the decision on day itself is written after it).
+        # Equity: orders written by the open. Crypto: orders written by day's snapshot cutoff, the
+        # latest the previous decision may be placed (the decision on day itself comes after it).
         pending = pending_orders(conn, agent_id, created_by=open_ts if not crypto else None)
         if crypto:
-            pending = [r for r in pending if r["created_at"] < close_ts]
+            last_ts = db.utc_ts(cal.crypto_times(day).snapshot_at)
+            pending = [r for r in pending if r["created_at"] <= last_ts]
         fills_out: list[tuple[int, L.Fill, str]] = []        # (order_id, fill, filled_at)
 
         # Rule 9: delisted stocks close at their last price; their pending orders are cancelled.
@@ -321,14 +338,28 @@ def settle_day(conn: sqlite3.Connection, agent_id: str, day: date, now: datetime
         filled_at = {s: open_ts for s in needed}
         bar_id: dict[str, int] = {}
         if crypto:
-            # §7 rule 4 (v1.12): the first closed minute bar at or after the decision time.
+            # §7 rule 4 (v1.13): the first closed minute bar in [t_ref, t_ref + 60 min).
             t_ref = ceil_minute(max([fill_from] + [cal._parse_ts(r["created_at"]) for r in pending]))
             symbols = sorted({o.symbol for o in orders})
-            fb = fill_bars(conn, symbols, t_ref, now, fill_from + WINDOW)
+            fb = fill_bars(conn, symbols, t_ref, now, t_ref + WINDOW)
             gone = [s for s in symbols if s not in fb]
-            if gone:
+            windows = {s: fetched_window(conn, s, t_ref, now) for s in gone}
+            waiting = [s for s in gone if windows[s] is None]
+            if waiting:
                 raise PriceNotAvailable(f"{day}: no closed, stored minute bar at or after {db.utc_ts(t_ref)} "
-                                        f"for {', '.join(gone)} (as of {db.utc_ts(now)})")
+                                        f"for {', '.join(waiting)} (as of {db.utc_ts(now)})")
+            for i, r in enumerate(pending):                  # no trade in the whole window: cancelled
+                if r["symbol"] in windows:
+                    w = windows[r["symbol"]]
+                    _insert(conn, "fills", {"order_id": r["order_id"], "status": "cancelled",
+                                            "filled_at": db.utc_ts(t_ref), "detail": json.dumps(
+                                                {"reason": "no_fill_bar", "window_start": w["window_start"],
+                                                 "window_end": w["window_end"], "window_id": w["window_id"]},
+                                                sort_keys=True)})
+            cancelled += [s for s in gone]
+            keep = [i for i, r in enumerate(pending) if r["symbol"] not in windows]
+            pending, orders = [pending[i] for i in keep], [orders[i] for i in keep]
+            symbols = [s for s in symbols if s in fb]
             opens = {s: fb[s]["open"] for s in symbols}
             filled_at.update({s: fb[s]["bar_ts"] for s in symbols})
             bar_id = {s: fb[s]["fill_bar_id"] for s in symbols}
@@ -399,6 +430,8 @@ def place_orders(conn: sqlite3.Connection, agent_id: str, day: date, closes: Map
     agent_id = str(agent_id)
     if targets is not None and decision_id is None:
         raise LedgerError("decision orders need a decision_id")
+    if _asset_class(conn, agent_id) == "crypto" and created_at > cal.crypto_times(day + timedelta(days=1)).snapshot_at:
+        return Placed("missed")      # §7 rule 4 (v1.13): after the next day's snapshot cutoff, no trade
     _begin(conn)
     try:
         if pending_orders(conn, agent_id):

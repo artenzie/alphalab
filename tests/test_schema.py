@@ -101,6 +101,7 @@ def populated(conn):
         (fetch,),
     )
     add_fill_bar(conn)
+    add_fill_window(conn)
     conn.execute("INSERT INTO experiment (name, start_date) VALUES ('shakedown', '2026-12-14')")
     conn.commit()
     return conn
@@ -112,6 +113,13 @@ def add_fill_bar(conn, bar_ts="2026-11-17T00:16:00.000Z", fetched_at="2026-11-17
         """INSERT INTO crypto_fill_bars (symbol, decision_date, window_start, bar_ts, open, high, low, close,
                volume, feed, fetched_at) VALUES ('BTC/USD', '2026-11-16', ?, ?, 65000, 65010, 64990, 65005,
                1.5, 'crypto', ?)""", (window_start, bar_ts, fetched_at)).lastrowid
+
+
+def add_fill_window(conn, start="2026-11-17T00:15:00.000Z", end="2026-11-17T01:15:00.000Z",
+                    fetched_at="2026-11-17T01:20:00.000Z"):
+    return conn.execute("INSERT INTO crypto_fill_windows (decision_date, window_start, window_end, symbols, "
+                        "fetched_at) VALUES ('2026-11-16', ?, ?, '[\"BTC/USD\"]', ?)",
+                        (start, end, fetched_at)).lastrowid
 
 
 # --- builds -----------------------------------------------------------------
@@ -363,6 +371,18 @@ def test_init_db_adds_fill_bars_to_an_old_database(tmp_path):
     c = db.init_db(path)
     assert c.execute("SELECT COUNT(*) FROM crypto_fill_bars").fetchone()[0] == 0
     c.close()
+
+
+@pytest.mark.parametrize("start, end, fetched_at", [
+    ("2026-11-17T03:10:00.000Z", "2026-11-17T04:10:00.000Z", "2026-11-17T04:09:59.999Z"),   # not closed yet
+    ("2026-11-17T03:10:00.000Z", "2026-11-17T04:00:00.000Z", "2026-11-17T04:20:00.000Z"),   # not 60 minutes
+    ("2026-11-17T03:10:30.000Z", "2026-11-17T04:10:30.000Z", "2026-11-17T04:20:00.000Z"),   # not a whole minute
+])
+def test_fill_window_record_only_for_a_whole_closed_window(conn, start, end, fetched_at):
+    """crypto_fill_windows (v1.13): the ledger's evidence of a fully fetched window."""
+    with pytest.raises(sqlite3.IntegrityError, match="CHECK"):
+        add_fill_window(conn, start, end, fetched_at)
+    add_fill_window(conn, "2026-11-17T03:10:00.000Z", "2026-11-17T04:10:00.000Z", "2026-11-17T04:10:00.000Z")
 
 
 def test_one_experiment_label_per_database(conn):

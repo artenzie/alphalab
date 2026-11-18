@@ -345,6 +345,26 @@ CREATE TABLE IF NOT EXISTS crypto_fill_bars (
 CREATE INDEX IF NOT EXISTS ix_crypto_fill_bars ON crypto_fill_bars (symbol, bar_ts);
 
 -- ---------------------------------------------------------------------------
+-- crypto_fill_windows: a fill window fetched in full after it closed (§7 rule 4, v1.13)
+-- ---------------------------------------------------------------------------
+-- One row per fetch of a whole window [window_start, window_start + 60 min),
+-- written by data/fill_prices.py only once every minute of it has closed.
+-- It is the ledger's evidence that a coin with no bar in the window really had
+-- none (no trades), rather than not yet fetched: only then is its order
+-- cancelled. window_start is the day's crypto decision time (t_ref).
+CREATE TABLE IF NOT EXISTS crypto_fill_windows (
+    window_id      INTEGER PRIMARY KEY,
+    decision_date  TEXT NOT NULL CHECK (decision_date GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]'),
+    window_start   TEXT NOT NULL CHECK (window_start GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:00.000Z'),
+    window_end     TEXT NOT NULL CHECK (window_end = strftime('%Y-%m-%dT%H:%M:%fZ', window_start, '+60 minutes')),
+    symbols        TEXT NOT NULL CHECK (json_valid(symbols)),   -- the coins asked for, JSON list
+    fetched_at     TEXT NOT NULL CHECK (fetched_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9]Z'),
+    run_id         TEXT,
+    CHECK (fetched_at >= window_end)                            -- the whole window had closed
+);
+CREATE INDEX IF NOT EXISTS ix_crypto_fill_windows ON crypto_fill_windows (decision_date, window_start);
+
+-- ---------------------------------------------------------------------------
 -- experiment: the label of this database file (protocol §9, v1.13)
 -- ---------------------------------------------------------------------------
 -- One database file per experiment (shakedown, official, or a dev copy). The
@@ -415,5 +435,7 @@ CREATE TRIGGER IF NOT EXISTS market_sessions_no_update  BEFORE UPDATE ON market_
 CREATE TRIGGER IF NOT EXISTS market_sessions_no_delete  BEFORE DELETE ON market_sessions  BEGIN SELECT RAISE(ABORT, 'market_sessions is append-only (CLAUDE.md rule 2)'); END;
 CREATE TRIGGER IF NOT EXISTS crypto_fill_bars_no_update BEFORE UPDATE ON crypto_fill_bars BEGIN SELECT RAISE(ABORT, 'crypto_fill_bars is append-only (CLAUDE.md rule 2)'); END;
 CREATE TRIGGER IF NOT EXISTS crypto_fill_bars_no_delete BEFORE DELETE ON crypto_fill_bars BEGIN SELECT RAISE(ABORT, 'crypto_fill_bars is append-only (CLAUDE.md rule 2)'); END;
+CREATE TRIGGER IF NOT EXISTS crypto_fill_windows_no_update BEFORE UPDATE ON crypto_fill_windows BEGIN SELECT RAISE(ABORT, 'crypto_fill_windows is append-only (CLAUDE.md rule 2)'); END;
+CREATE TRIGGER IF NOT EXISTS crypto_fill_windows_no_delete BEFORE DELETE ON crypto_fill_windows BEGIN SELECT RAISE(ABORT, 'crypto_fill_windows is append-only (CLAUDE.md rule 2)'); END;
 CREATE TRIGGER IF NOT EXISTS experiment_no_update       BEFORE UPDATE ON experiment       BEGIN SELECT RAISE(ABORT, 'experiment is append-only (CLAUDE.md rule 2)'); END;
 CREATE TRIGGER IF NOT EXISTS experiment_no_delete       BEFORE DELETE ON experiment       BEGIN SELECT RAISE(ABORT, 'experiment is append-only (CLAUDE.md rule 2)'); END;
