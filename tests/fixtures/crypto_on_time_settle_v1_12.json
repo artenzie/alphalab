@@ -1,0 +1,213 @@
+{
+ "equity": [
+  {
+   "agent_id": "C0",
+   "as_of_date": "2026-11-16",
+   "borrow_fee_usd": 0.0,
+   "cash": 100000.0,
+   "corrects_id": null,
+   "equity": 100000.0,
+   "equity_id": 1,
+   "gross_exposure": 0.0,
+   "long_value": 0.0,
+   "margin_interest_usd": 0.0,
+   "short_value": 0.0,
+   "trading_fees_usd": 0.0
+  },
+  {
+   "agent_id": "C1",
+   "as_of_date": "2026-11-16",
+   "borrow_fee_usd": 0.0,
+   "cash": 100000.0,
+   "corrects_id": null,
+   "equity": 100000.0,
+   "equity_id": 2,
+   "gross_exposure": 0.0,
+   "long_value": 0.0,
+   "margin_interest_usd": 0.0,
+   "short_value": 0.0,
+   "trading_fees_usd": 0.0
+  },
+  {
+   "agent_id": "C0",
+   "as_of_date": "2026-11-17",
+   "borrow_fee_usd": 0.0,
+   "cash": 1.5916710253804922e-05,
+   "corrects_id": null,
+   "equity": 101079.12475591671,
+   "equity_id": 3,
+   "gross_exposure": 101079.12474,
+   "long_value": 101079.12474,
+   "margin_interest_usd": 0.0,
+   "short_value": 0.0,
+   "trading_fees_usd": 249.37655856379874
+  },
+  {
+   "agent_id": "C1",
+   "as_of_date": "2026-11-17",
+   "borrow_fee_usd": 0.0,
+   "cash": 49796.95849678112,
+   "corrects_id": null,
+   "equity": 100925.16358738112,
+   "equity_id": 4,
+   "gross_exposure": 51128.2050906,
+   "long_value": 51128.2050906,
+   "margin_interest_usd": 0.0,
+   "short_value": 0.0,
+   "trading_fees_usd": 125.19461721500969
+  }
+ ],
+ "fills": [
+  {
+   "corrects_id": null,
+   "detail": "{\"fill_bar_id\": 2, \"origin\": \"decision\", \"requested_qty\": 1.538461538, \"risk_event_id\": 1, \"slippage_usd\": 49.8503865195}",
+   "fee_usd": 249.37655856379874,
+   "fill_id": 1,
+   "fill_price": 65132.549999999996,
+   "filled_at": "2026-11-17T00:16:00.000Z",
+   "order_id": 1,
+   "qty": 1.53150189,
+   "reference_price": 65100.0,
+   "slippage_bps": 5.0,
+   "status": "filled"
+  },
+  {
+   "corrects_id": null,
+   "detail": "{\"fill_bar_id\": 2, \"origin\": \"decision\", \"slippage_usd\": 15.02307690555}",
+   "fee_usd": 75.15294222001387,
+   "fill_id": 2,
+   "fill_price": 65132.549999999996,
+   "filled_at": "2026-11-17T00:16:00.000Z",
+   "order_id": 2,
+   "qty": 0.461538461,
+   "reference_price": 65100.0,
+   "slippage_bps": 5.0,
+   "status": "filled"
+  },
+  {
+   "corrects_id": null,
+   "detail": "{\"fill_bar_id\": 4, \"origin\": \"decision\", \"slippage_usd\": 10.003333332333002}",
+   "fee_usd": 50.04167499499582,
+   "fill_id": 3,
+   "fill_price": 3002.5004999999996,
+   "filled_at": "2026-11-17T00:16:00.000Z",
+   "order_id": 3,
+   "qty": 6.666666666,
+   "reference_price": 3001.0,
+   "slippage_bps": 5.0,
+   "status": "filled"
+  }
+ ],
+ "orders": [
+  {
+   "agent_id": "C0",
+   "alpaca_account": null,
+   "alpaca_order_id": null,
+   "asset_class": "crypto",
+   "corrects_id": null,
+   "created_at": "2026-11-17T00:15:41.000Z",
+   "decision_id": 1,
+   "notional_usd": null,
+   "order_id": 1,
+   "origin": "decision",
+   "qty": 1.538461538,
+   "risk_event_id": null,
+   "side": "buy",
+   "symbol": "BTC/USD",
+   "target_weight": 1.0,
+   "venue": "ledger"
+  },
+  {
+   "agent_id": "C1",
+   "alpaca_account": null,
+   "alpaca_order_id": null,
+   "asset_class": "crypto",
+   "corrects_id": null,
+   "created_at": "2026-11-17T00:15:41.000Z",
+   "decision_id": 2,
+   "notional_usd": null,
+   "order_id": 2,
+   "origin": "decision",
+   "qty": 0.461538461,
+   "risk_event_id": null,
+   "side": "buy",
+   "symbol": "BTC/USD",
+   "target_weight": 0.3,
+   "venue": "ledger"
+  },
+  {
+   "agent_id": "C1",
+   "alpaca_account": null,
+   "alpaca_order_id": null,
+   "asset_class": "crypto",
+   "corrects_id": null,
+   "created_at": "2026-11-17T00:15:41.000Z",
+   "decision_id": 2,
+   "notional_usd": null,
+   "order_id": 3,
+   "origin": "decision",
+   "qty": 6.666666666,
+   "risk_event_id": null,
+   "side": "buy",
+   "symbol": "ETH/USD",
+   "target_weight": 0.2,
+   "venue": "ledger"
+  }
+ ],
+ "positions": [
+  {
+   "agent_id": "C0",
+   "as_of_date": "2026-11-17",
+   "asset_class": "crypto",
+   "avg_cost": 65132.549999999996,
+   "corrects_id": null,
+   "mark_price": 66000.0,
+   "market_value": 101079.12474,
+   "position_id": 1,
+   "qty": 1.53150189,
+   "symbol": "BTC/USD",
+   "unrealised_pnl": 1328.5013144805066
+  },
+  {
+   "agent_id": "C1",
+   "as_of_date": "2026-11-17",
+   "asset_class": "crypto",
+   "avg_cost": 65132.549999999996,
+   "corrects_id": null,
+   "mark_price": 66000.0,
+   "market_value": 30461.538426,
+   "position_id": 2,
+   "qty": 0.461538461,
+   "symbol": "BTC/USD",
+   "unrealised_pnl": 400.361537994452
+  },
+  {
+   "agent_id": "C1",
+   "as_of_date": "2026-11-17",
+   "asset_class": "crypto",
+   "avg_cost": 3002.5004999999996,
+   "corrects_id": null,
+   "mark_price": 3100.0,
+   "market_value": 20666.6666646,
+   "position_id": 3,
+   "qty": 6.666666666,
+   "symbol": "ETH/USD",
+   "unrealised_pnl": 649.9966666016694
+  }
+ ],
+ "risk_events": [
+  {
+   "agent_id": "C0",
+   "applied_weight": 0.9954762289560944,
+   "corrects_id": null,
+   "decision_id": 1,
+   "detail": "{\"applied_qty\": 1.53150189, \"applied_weight_is\": \"target_weight x factor (approximate)\", \"buy_cost\": 100454.43285447905, \"cash_after_sells\": 100000.0, \"factor\": 0.9954762289560944, \"requested_qty\": 1.538461538}",
+   "event_type": "clip",
+   "occurred_at": "2026-11-17T00:15:00.000Z",
+   "requested_weight": 1.0,
+   "risk_event_id": 1,
+   "rule": "cash_floor",
+   "symbol": "BTC/USD"
+  }
+ ]
+}
