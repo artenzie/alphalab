@@ -16,6 +16,18 @@ Per agent, from the append-only log (newest row per day wins, so corrections app
                 comes from the positions decided on D_k-1, so it is dropped when D_k-1's
                 snapshot was late.
 
+AI target overlap (herding), per equity snapshot day, for every pair of AI agents:
+
+    overlap(a, b) = sum over stocks of min(long_a, long_b) + min(short_a, short_b)
+
+with each agent's target weights after the risk checks (the weights its orders were
+sized from). Longs only overlap with longs and shorts with shorts, so it is the share of
+portfolio value both agents hold in the same stock in the same direction: 0 = nothing in
+common, 1 = the same fully invested book. A hold, invalid or unavailable decision keeps
+the agent's last targets (it holds them); before its first targets it has none and its
+pairs are left out that day. The report gives the daily mean, min and max over pairs and
+each pair's mean over the days.
+
 This is the first piece of §10; the risk-adjusted metrics and the bootstrap come in Phase 6.
 """
 
@@ -27,9 +39,14 @@ import math
 import sqlite3
 import sys
 from dataclasses import dataclass, field
+from itertools import combinations
 from pathlib import Path
+from statistics import mean
+from typing import Mapping
 
+from agents.models import AGENT_MODELS
 from runner import experiment as ex
+from runner.daily import applied_weights
 
 
 @dataclass
@@ -91,6 +108,71 @@ def load(conn: sqlite3.Connection) -> dict[str, AgentResult]:
     return res
 
 
+def overlap(a: Mapping[str, float], b: Mapping[str, float]) -> float:
+    """Same-direction sum of min weights: longs with longs, shorts with shorts."""
+    tot = 0.0
+    for s in set(a) & set(b):
+        x, y = a[s], b[s]
+        if x > 0 and y > 0:
+            tot += min(x, y)
+        elif x < 0 and y < 0:
+            tot += min(-x, -y)
+    return tot
+
+
+def ai_targets_by_day(conn: sqlite3.Connection) -> dict[str, dict[str, dict[str, float]]]:
+    """snapshot_date -> AI agent -> its target weights after risk (holds carry the last targets)."""
+    ai = [a for a in AGENT_MODELS if not a.startswith("C")]
+    snaps = conn.execute("""SELECT snapshot_id, snapshot_date FROM snapshots
+                            WHERE asset_class = 'us_equity' AND corrects_id IS NULL ORDER BY snapshot_date""").fetchall()
+    last: dict[str, dict[str, float]] = {}
+    out: dict[str, dict[str, dict[str, float]]] = {}
+    names = ", ".join("?" * len(ai))
+    for snap in snaps:
+        for row in conn.execute(
+                f"""SELECT * FROM decisions AS d WHERE d.snapshot_id = ? AND d.agent_id IN ({names})
+                      AND d.corrects_id IS NULL
+                      AND d.decision_id = (SELECT q.decision_id FROM decisions AS q
+                                           WHERE q.agent_id = d.agent_id AND q.snapshot_id = d.snapshot_id
+                                             AND q.corrects_id IS NULL
+                                           ORDER BY q.attempt DESC, q.decision_id DESC LIMIT 1)""",
+                [snap["snapshot_id"], *ai]):
+            w = applied_weights(conn, row)
+            if w is not None:
+                last[row["agent_id"]] = {s: x for s, x in w.items() if x}
+        out[snap["snapshot_date"]] = {a: dict(w) for a, w in last.items()}
+    return out
+
+
+def overlap_by_day(conn: sqlite3.Connection) -> dict[str, dict[tuple[str, str], float]]:
+    """snapshot_date -> (agent a, agent b) -> overlap, for every pair that both have targets."""
+    out = {}
+    for day, targets in ai_targets_by_day(conn).items():
+        ids = sorted(targets, key=_order)
+        out[day] = {(a, b): overlap(targets[a], targets[b]) for a, b in combinations(ids, 2)}
+    return out
+
+
+def overlap_report(conn: sqlite3.Connection) -> list[str]:
+    days = {d: p for d, p in overlap_by_day(conn).items() if p}
+    lines = ["", "AI target overlap (same-direction sum of min weights; 0 = none, 1 = same book)"]
+    if not days:
+        return lines + ["  no AI decisions yet"]
+    lines.append(f"  {'day':<10} {'pairs':>5} {'mean':>6} {'min':>6} {'max':>6}  most similar")
+    for d, pairs in days.items():
+        v = list(pairs.values())
+        top = max(pairs, key=lambda k: (pairs[k], k))
+        lines.append(f"  {d:<10} {len(v):>5} {mean(v):>6.2f} {min(v):>6.2f} {max(v):>6.2f}  "
+                     f"{top[0]}-{top[1]} {pairs[top]:.2f}")
+    per_pair: dict[tuple[str, str], list[float]] = {}
+    for pairs in days.values():
+        for k, x in pairs.items():
+            per_pair.setdefault(k, []).append(x)
+    lines.append("  pair means over the days: " + ", ".join(
+        f"{a}-{b} {mean(v):.2f}" for (a, b), v in sorted(per_pair.items(), key=lambda kv: (_order(kv[0][0]), _order(kv[0][1])))))
+    return lines
+
+
 def _order(aid: str) -> tuple:
     return (aid.startswith("C"), int(aid.lstrip("C")) if aid.lstrip("C").isdigit() else 0, aid)
 
@@ -119,6 +201,7 @@ def report(conn: sqlite3.Connection, exclude_late: bool = False) -> str:
     lines += ["", f"late days: {len(late_total)}" + (f" ({', '.join(late_total)})" if late_total else "")]
     if exclude_late:
         lines.append("excl. late: each day's return driven by a late decision (the day after it) is left out")
+    lines += overlap_report(conn)
     return "\n".join(lines)
 
 

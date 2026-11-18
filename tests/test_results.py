@@ -1,6 +1,8 @@
 """Results report (analysis/results.py): late days counted and excludable (protocol v1.13)."""
 
 import math
+
+import pytest
 import sys
 from datetime import timedelta
 from pathlib import Path
@@ -45,3 +47,29 @@ def test_cli_reads_the_database_read_only(conn, clients, tmp_path, capsys):
     assert results.main(["--db", path, "--exclude-late"]) == 0
     out = capsys.readouterr().out
     assert "experiment 'dev'" in out and "late days: 0" in out
+
+
+def test_overlap_is_same_direction_sum_of_min_weights():
+    a = {"AAPL": 0.15, "NVDA": 0.15, "XOM": -0.10, "JPM": 0.10}
+    b = {"AAPL": 0.10, "NVDA": 0.20, "XOM": -0.05, "JPM": -0.10}
+    assert results.overlap(a, b) == pytest.approx(0.10 + 0.15 + 0.05)     # JPM long vs short: none
+    assert results.overlap(a, a) == pytest.approx(0.50)
+    assert results.overlap(a, {}) == 0.0 and results.overlap(b, a) == results.overlap(a, b)
+
+
+def test_daily_overlap_uses_risk_checked_targets_and_carries_holds(conn, clients, monkeypatch):
+    import test_runner
+    from test_runner import Client
+    monkeypatch.setitem(test_runner.AI_TARGETS, "9", {"AAPL": 0.10, "NVDA": 0.20, "XOM": -0.05})
+    monkeypatch.setitem(test_runner.AI_TARGETS, "11", {"AMZN": 0.30})      # clipped to 20% by risk
+    equity_run(conn, DAYS[0], clients)
+    down = dict(clients, **{"9": Client("9", fail=True)})                   # agent 9 unavailable: holds
+    equity_run(conn, DAYS[1], down)
+    by_day = results.overlap_by_day(conn)
+    d0, d1 = DAYS[0].isoformat(), DAYS[1].isoformat()
+    assert len(by_day[d0]) == 10
+    assert by_day[d0][("8", "9")] == pytest.approx(0.30)
+    assert by_day[d0][("11", "12")] == pytest.approx(0.20)                  # both AMZN at the 20% cap
+    assert by_day[d1][("8", "9")] == pytest.approx(0.30)                    # 9's day-1 targets carried
+    text = results.report(conn)
+    assert "AI target overlap" in text and f"{d0}    10" in text
