@@ -669,3 +669,46 @@ def test_crypto_placement_failure_is_resumed_at_the_days_t_ref(conn, clients, mo
     r2, _ = crypto_run(conn, START, clients, at=cal.crypto_times(START).decide_at + timedelta(hours=1))
     assert r2.agents["C1"].placed == "placed"
     assert len(conn.execute("SELECT DISTINCT created_at FROM orders").fetchall()) == 1
+
+
+# ---------------------------------------------------------------------------
+# §8 Claude reasoning gate (v1.14): the shakedown shadow call
+# ---------------------------------------------------------------------------
+
+def test_shadow_call_uses_agent_8s_exact_prompt_at_high_and_is_never_traded(conn, clients, monkeypatch):
+    monkeypatch.setattr(roster, "SHADOW_EXPERIMENT", "dev")
+    monkeypatch.setattr(roster, "SHADOW_START", DAYS[0])
+    monkeypatch.setattr(roster, "SHADOW_END", DAYS[1])
+    shadow = Client("8")
+    clients = dict(clients, **{roster.SHADOW_KEY: shadow})
+    seen = []
+    real_agent = roster.shadow_agent
+    monkeypatch.setattr(roster, "shadow_agent", lambda *a, **kw: seen.append(real_agent(*a, **kw)) or seen[-1])
+    r, _ = equity_run(conn, DAYS[0], clients)
+    assert r.exit_code == 0, r.errors
+    assert seen[0].model.reasoning == "high" and seen[0].model.model_id == roster.model_for("8").model_id
+    assert shadow.calls == clients["8"].calls                              # the identical prompt
+    rows = conn.execute("SELECT * FROM shadow_decisions").fetchall()
+    assert len(rows) == 1 and rows[0]["reasoning_setting"] == "high" and rows[0]["status"] == "ok"
+    d8 = conn.execute("SELECT * FROM decisions WHERE agent_id = '8'").fetchone()
+    assert json.loads(rows[0]["applied_targets"]) == daily.applied_weights(conn, d8)
+    assert d8["reasoning_setting"] == "medium"
+    n_orders = counts(conn)["orders"]
+    assert conn.execute("SELECT COUNT(*) FROM orders WHERE agent_id = '8'").fetchone()[0] == 3   # 8's only
+    hb = [(e, d) for j, e, d in heartbeat(conn, r.run_id) if j == f"decide:{roster.SHADOW_KEY}"]
+    assert [e for e, _ in hb] == ["started", "finished"] and hb[1][1]["cost_usd"] == pytest.approx(0.001)
+    r2, _ = equity_run(conn, DAYS[0], clients, at=cal.equity_times(DAYS[0], conn).decide_at + timedelta(minutes=9))
+    assert len(shadow.calls) == 1 and counts(conn)["orders"] == n_orders   # rerun: no second shadow call
+    equity_run(conn, DAYS[1], clients)
+    equity_run(conn, DAYS[2], clients)                                     # after SHADOW_END: none
+    assert len(shadow.calls) == 2
+    assert conn.execute("SELECT COUNT(*) FROM shadow_decisions").fetchone()[0] == 2
+
+
+def test_no_shadow_call_outside_the_shakedown(conn, clients):
+    r, _ = equity_run(conn, DAYS[0], clients)                              # experiment 'dev'
+    assert r.exit_code == 0 and conn.execute("SELECT COUNT(*) FROM shadow_decisions").fetchone()[0] == 0
+    assert not roster.shadow_active("official", "us_equity", date(2027, 1, 4))
+    assert not roster.shadow_active("shakedown", "crypto", date(2026, 12, 20))
+    assert roster.shadow_active("shakedown", "us_equity", date(2026, 12, 14))
+    assert not roster.shadow_active("shakedown", "us_equity", date(2027, 1, 11))

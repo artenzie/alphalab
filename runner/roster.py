@@ -7,6 +7,8 @@ TEMPLATES; rule 3 freezes this file from Mon 11 Jan 2027.
 
 from __future__ import annotations
 
+from dataclasses import replace
+from datetime import date
 from typing import Callable, Sequence
 
 from agents.harness import (BACKOFF_S, CRYPTO_PLACEHOLDER_TEMPLATE, PLACEHOLDER_TEMPLATE, AIAgent)
@@ -48,3 +50,22 @@ def rule_agent(agent_id: str) -> Agent:
 def ai_agent(agent_id: str, client: LLMClient, sleep: Callable[[float], None],
              backoff: Sequence[float] = BACKOFF_S) -> AIAgent:
     return AIAgent(agent_id, model_for(agent_id), TEMPLATES[agent_id], client, sleep=sleep, backoff=backoff)
+
+
+# §8 Claude reasoning gate (v1.14): during the shakedown, one untraded shadow call per equity
+# decision day, Claude at effort high on exactly agent 8's prompt. Its own client and record.
+SHADOW_OF = "8"
+SHADOW_REASONING = "high"
+SHADOW_EXPERIMENT = "shakedown"
+SHADOW_START, SHADOW_END = date(2026, 12, 14), date(2027, 1, 8)
+SHADOW_KEY = "shadow:8"                 # the client_for key and heartbeat name ('decide:shadow:8')
+
+
+def shadow_active(experiment: str, asset_class: str, day: date) -> bool:
+    return (experiment == SHADOW_EXPERIMENT and asset_class == "us_equity"
+            and SHADOW_START <= day <= SHADOW_END)
+
+
+def shadow_agent(client: LLMClient, sleep: Callable[[float], None], backoff: Sequence[float] = BACKOFF_S) -> AIAgent:
+    model = replace(model_for(SHADOW_OF), reasoning=SHADOW_REASONING)
+    return AIAgent(SHADOW_OF, model, TEMPLATES[SHADOW_OF], client, sleep=sleep, backoff=backoff)

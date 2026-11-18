@@ -28,6 +28,14 @@ the agent's last targets (it holds them); before its first targets it has none a
 pairs are left out that day. The report gives the daily mean, min and max over pairs and
 each pair's mean over the days.
 
+Reasoning (§8 rule, v1.14): per AI agent, the final call of each decision: median
+reasoning tokens and the share of calls with any reasoning.
+
+Claude reasoning gate (§8, v1.14, pre-registered): over every shakedown day on which both
+have targets, the mean overlap between the shadow book (Claude at effort high on agent 8's
+prompt, shadow_decisions.applied_targets) and agent 8's risk-checked targets. Below 0.6:
+Claude moves to effort high for all its agents before the 10 Jan freeze; otherwise medium.
+
 This is the first piece of §10; the risk-adjusted metrics and the bootstrap come in Phase 6.
 """
 
@@ -41,7 +49,7 @@ import sys
 from dataclasses import dataclass, field
 from itertools import combinations
 from pathlib import Path
-from statistics import mean
+from statistics import mean, median
 from typing import Mapping
 
 from agents.models import AGENT_MODELS
@@ -173,6 +181,68 @@ def overlap_report(conn: sqlite3.Connection) -> list[str]:
     return lines
 
 
+GATE_THRESHOLD = 0.6
+
+
+def reasoning_summary(conn: sqlite3.Connection) -> dict[str, tuple[int, float, float]]:
+    """AI agent -> (calls, median reasoning tokens, share of calls with any), final attempts only."""
+    out: dict[str, list[int]] = {}
+    for r in conn.execute(
+            """SELECT d.agent_id, d.reasoning_tokens FROM decisions AS d
+               WHERE d.model_id IS NOT NULL AND d.corrects_id IS NULL AND d.reasoning_tokens IS NOT NULL
+                 AND d.decision_id = (SELECT q.decision_id FROM decisions AS q WHERE q.agent_id = d.agent_id
+                                      AND q.snapshot_id = d.snapshot_id ORDER BY q.attempt DESC,
+                                      q.decision_id DESC LIMIT 1)"""):
+        out.setdefault(r["agent_id"], []).append(r["reasoning_tokens"])
+    return {a: (len(v), median(v), sum(1 for x in v if x > 0) / len(v)) for a, v in out.items()}
+
+
+@dataclass(frozen=True)
+class Gate:
+    days: int
+    mean_overlap: float | None
+    verdict: str              # 'high' | 'medium' | 'no data'
+    per_day: dict[str, float]
+
+
+def reasoning_gate(conn: sqlite3.Connection) -> Gate:
+    """§8 gate: mean overlap of the shadow book with agent 8's targets, days where both have targets."""
+    from runner import roster
+    real = ai_targets_by_day(conn)
+    per_day = {}
+    for r in conn.execute(
+            """SELECT s.snapshot_date, h.applied_targets FROM shadow_decisions AS h
+               JOIN snapshots AS s ON s.snapshot_id = h.snapshot_id
+               WHERE h.shadow_of = ? AND h.applied_targets IS NOT NULL
+                 AND h.shadow_id = (SELECT MAX(q.shadow_id) FROM shadow_decisions AS q
+                                    WHERE q.shadow_of = h.shadow_of AND q.snapshot_id = h.snapshot_id)
+               ORDER BY s.snapshot_date""", (roster.SHADOW_OF,)):
+        mine = real.get(r["snapshot_date"], {}).get(roster.SHADOW_OF)
+        if mine is not None:
+            per_day[r["snapshot_date"]] = overlap(json.loads(r["applied_targets"]), mine)
+    if not per_day:
+        return Gate(0, None, "no data", {})
+    m = mean(per_day.values())
+    # rounded to 6 dp so float sums can't tip an exact 0.6 below the threshold
+    return Gate(len(per_day), m, "high" if round(m, 6) < GATE_THRESHOLD else "medium", per_day)
+
+
+def gate_report(conn: sqlite3.Connection) -> list[str]:
+    lines = ["", "Reasoning (final call per decision): calls, median reasoning tokens, share with any"]
+    rs = reasoning_summary(conn)
+    for a in sorted(rs, key=_order):
+        n, med, share = rs[a]
+        model = AGENT_MODELS[a].name if a in AGENT_MODELS else "?"
+        lines.append(f"  {a:<4} {model:<9} {n:>4} calls  median {med:>7.0f}  with reasoning {100 * share:>3.0f}%")
+    if not rs:
+        lines.append("  no AI calls yet")
+    g = reasoning_gate(conn)
+    if g.days:
+        lines.append(f"Claude reasoning gate (§8): shadow (high) vs agent 8 overlap, mean {g.mean_overlap:.2f} "
+                     f"over {g.days} day(s); threshold {GATE_THRESHOLD} -> effort {g.verdict}")
+    return lines
+
+
 def _order(aid: str) -> tuple:
     return (aid.startswith("C"), int(aid.lstrip("C")) if aid.lstrip("C").isdigit() else 0, aid)
 
@@ -202,6 +272,7 @@ def report(conn: sqlite3.Connection, exclude_late: bool = False) -> str:
     if exclude_late:
         lines.append("excl. late: each day's return driven by a late decision (the day after it) is left out")
     lines += overlap_report(conn)
+    lines += gate_report(conn)
     return "\n".join(lines)
 
 

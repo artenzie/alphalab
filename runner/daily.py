@@ -473,8 +473,11 @@ class _Day:
             wait_until(times.decide_at, self.deps)
         self.hb("decide", "started", to_decide=todo, stored=stored, ai_parallel=[a for a in todo if a in self.ai_ids])
 
+        shadow = (roster.shadow_active(exp.name, self.ac, self.day) and roster.SHADOW_OF in settled
+                  and not self.conn.execute("SELECT 1 FROM shadow_decisions WHERE shadow_of = ? AND snapshot_id = ?",
+                                            (roster.SHADOW_OF, sid)).fetchone())
         etb: dict[str, bool] = {}
-        if not self.crypto and any(profile(a).shorts for a in todo + stored):
+        if not self.crypto and (shadow or any(profile(a).shorts for a in todo + stored)):
             stocks = sorted(s for s in snap.payload["symbols"] if s != "SPY")
             self.hb("fetch_etb", "started", symbols=len(stocks))
             try:
@@ -484,6 +487,8 @@ class _Day:
                 self.hb("fetch_etb", "error", error=_err(exc), effect="no flags: new shorts rejected")
 
         inputs = {aid: self._inputs(aid, closes, ctx0) for aid in todo + stored}
+        if shadow and roster.SHADOW_OF not in inputs:
+            inputs[roster.SHADOW_OF] = self._inputs(roster.SHADOW_OF, closes, ctx0)
 
         self.deferred: list[tuple[str, int, Any]] = []      # crypto: placed together at t_ref
         for aid in stored:                                     # decided in an earlier run, not placed yet
@@ -500,6 +505,13 @@ class _Day:
                 portfolio, ctx, _ = inputs[aid]
                 self.hb(f"decide:{aid}", "started", agent_id=aid, model=agent.model.model_id)
                 futures[pool.submit(agent.decide, snap, portfolio, ctx)] = aid
+            if shadow:                                         # §8 gate: untraded, agent 8's exact inputs
+                agent = roster.shadow_agent(self.deps.client_for(roster.SHADOW_KEY), self.deps.ai_sleep,
+                                            self.deps.ai_backoff)
+                portfolio, ctx, _ = inputs[roster.SHADOW_OF]
+                self.hb(f"decide:{roster.SHADOW_KEY}", "started", shadow_of=roster.SHADOW_OF,
+                        model=agent.model.model_id, reasoning=agent.model.reasoning)
+                futures[pool.submit(agent.decide, snap, portfolio, ctx)] = roster.SHADOW_KEY
             for aid in todo:                                   # rule agents, in turn, while the AI calls run
                 if aid in self.ai_ids:
                     continue
@@ -517,6 +529,9 @@ class _Day:
                 except Exception as exc:  # noqa: BLE001
                     dec, error = Decision.hold(f"held (invalid): {_err(exc)}"[:300]), _err(exc) + \
                         "\n" + traceback.format_exc()[-1500:]
+                if aid == roster.SHADOW_KEY:
+                    self._record_shadow(sid, dec, error, inputs[roster.SHADOW_OF][2], etb, deadline)
+                    continue
                 self._record(aid, sid, dec, error, inputs[aid][2], etb, closes, deadline)
         finally:
             pool.shutdown(wait=True)
@@ -576,6 +591,35 @@ class _Day:
                 attempts=rep.attempts, cost_usd=rep.cost_usd, hold=dec.weights is None, risk_events=len(events),
                 **({"error": error[:500]} if error else {"reason": f"held ({status})"} if failed else {}))
         self._queue_place(aid, did, weights, closes, deadline)
+
+    def _record_shadow(self, sid, dec, error, current, etb, deadline) -> None:
+        """§8 gate (v1.14): the shadow call's attempts, with its targets after agent 8's risk checks.
+        Never traded: no risk_events, no orders."""
+        job = f"decide:{roster.SHADOW_KEY}"
+        record = getattr(dec, "record", None)
+        decided_at = self.deps.now()
+        if decided_at > deadline:
+            self.hb(job, "error", reason="decided after the deadline: not recorded")
+            return
+        if error is not None or record is None:
+            self.hb(job, "error", error=(error or "no call record")[:500])
+            return
+        weights, _ = apply_risk(roster.SHADOW_OF, dec, etb, current)
+        ts = db.utc_ts(decided_at)
+        last = len(record.attempts) - 1
+        with self.conn:
+            for i, a in enumerate(record.attempts):
+                row = a.row()
+                row.pop("reasoning_setting", None)
+                _insert(self.conn, "shadow_decisions", {
+                    "shadow_of": roster.SHADOW_OF, "snapshot_id": sid, "decided_at": ts,
+                    "reasoning_setting": a.reasoning_setting, **row,
+                    "applied_targets": (json.dumps(dict(weights), sort_keys=True)
+                                        if i == last and weights is not None else None)})
+        cost = sum(a.cost_usd or 0.0 for a in record.attempts)
+        failed = record.status in ("unavailable", "capped")
+        self.hb(job, "error" if failed else "finished", status=record.status, attempts=len(record.attempts),
+                cost_usd=cost, reasoning_tokens=record.attempts[-1].reasoning_tokens, hold=weights is None)
 
     def _queue_place(self, aid, did, weights, closes, deadline) -> None:
         if self.crypto:

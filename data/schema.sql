@@ -365,6 +365,41 @@ CREATE TABLE IF NOT EXISTS crypto_fill_windows (
 CREATE INDEX IF NOT EXISTS ix_crypto_fill_windows ON crypto_fill_windows (decision_date, window_start);
 
 -- ---------------------------------------------------------------------------
+-- shadow_decisions: the shakedown's untraded Claude-at-high call (§8 gate, v1.14)
+-- ---------------------------------------------------------------------------
+-- One row per attempt, like decisions, for a call made with exactly agent
+-- `shadow_of`'s prompt but another setting (reasoning_setting 'high'). Never
+-- traded, never in any agent's input. applied_targets: its targets after the
+-- shadowed agent's risk checks (NULL for a hold or a failed attempt).
+CREATE TABLE IF NOT EXISTS shadow_decisions (
+    shadow_id         INTEGER PRIMARY KEY,
+    shadow_of         TEXT NOT NULL REFERENCES agents(agent_id),
+    snapshot_id       INTEGER NOT NULL REFERENCES snapshots(snapshot_id),
+    attempt           INTEGER NOT NULL DEFAULT 1 CHECK (attempt >= 1),
+    decided_at        TEXT NOT NULL CHECK (decided_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9]Z'),
+    status            TEXT NOT NULL CHECK (status IN ('ok', 'invalid', 'unavailable', 'capped')),
+    model_id          TEXT NOT NULL,
+    provider_served   TEXT,
+    reasoning_setting TEXT NOT NULL,
+    temperature       REAL,
+    prompt_hash       TEXT,
+    raw_response      TEXT,
+    tokens_in         INTEGER CHECK (tokens_in >= 0),
+    tokens_out        INTEGER CHECK (tokens_out >= 0),
+    reasoning_tokens  INTEGER CHECK (reasoning_tokens IS NULL OR reasoning_tokens >= 0),
+    cost_usd          REAL CHECK (cost_usd >= 0),
+    latency_ms        INTEGER CHECK (latency_ms >= 0),
+    parsed_targets    TEXT CHECK (parsed_targets IS NULL OR json_valid(parsed_targets)),
+    applied_targets   TEXT CHECK (applied_targets IS NULL OR json_valid(applied_targets)),
+    reasons           TEXT CHECK (reasons IS NULL OR json_valid(reasons)),
+    overall_reasoning TEXT,
+    confidence        REAL CHECK (confidence IS NULL OR (confidence BETWEEN 0 AND 1)),
+    error             TEXT,
+    CHECK (status <> 'ok' OR parsed_targets IS NOT NULL)
+);
+CREATE INDEX IF NOT EXISTS ix_shadow_decisions ON shadow_decisions (shadow_of, snapshot_id);
+
+-- ---------------------------------------------------------------------------
 -- experiment: the label of this database file (protocol §9, v1.13)
 -- ---------------------------------------------------------------------------
 -- One database file per experiment (shakedown, official, or a dev copy). The
@@ -437,5 +472,7 @@ CREATE TRIGGER IF NOT EXISTS crypto_fill_bars_no_update BEFORE UPDATE ON crypto_
 CREATE TRIGGER IF NOT EXISTS crypto_fill_bars_no_delete BEFORE DELETE ON crypto_fill_bars BEGIN SELECT RAISE(ABORT, 'crypto_fill_bars is append-only (CLAUDE.md rule 2)'); END;
 CREATE TRIGGER IF NOT EXISTS crypto_fill_windows_no_update BEFORE UPDATE ON crypto_fill_windows BEGIN SELECT RAISE(ABORT, 'crypto_fill_windows is append-only (CLAUDE.md rule 2)'); END;
 CREATE TRIGGER IF NOT EXISTS crypto_fill_windows_no_delete BEFORE DELETE ON crypto_fill_windows BEGIN SELECT RAISE(ABORT, 'crypto_fill_windows is append-only (CLAUDE.md rule 2)'); END;
+CREATE TRIGGER IF NOT EXISTS shadow_decisions_no_update BEFORE UPDATE ON shadow_decisions BEGIN SELECT RAISE(ABORT, 'shadow_decisions is append-only (CLAUDE.md rule 2)'); END;
+CREATE TRIGGER IF NOT EXISTS shadow_decisions_no_delete BEFORE DELETE ON shadow_decisions BEGIN SELECT RAISE(ABORT, 'shadow_decisions is append-only (CLAUDE.md rule 2)'); END;
 CREATE TRIGGER IF NOT EXISTS experiment_no_update       BEFORE UPDATE ON experiment       BEGIN SELECT RAISE(ABORT, 'experiment is append-only (CLAUDE.md rule 2)'); END;
 CREATE TRIGGER IF NOT EXISTS experiment_no_delete       BEFORE DELETE ON experiment       BEGIN SELECT RAISE(ABORT, 'experiment is append-only (CLAUDE.md rule 2)'); END;

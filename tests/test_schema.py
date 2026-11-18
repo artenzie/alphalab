@@ -102,6 +102,10 @@ def populated(conn):
     )
     add_fill_bar(conn)
     add_fill_window(conn)
+    conn.execute("""INSERT INTO shadow_decisions (shadow_of, snapshot_id, decided_at, status, model_id,
+                       reasoning_setting, parsed_targets, applied_targets)
+                    VALUES ('8', ?, '2026-12-14T23:00:30.000Z', 'ok', 'anthropic/claude-sonnet-5.5', 'high',
+                            '{"WMT": 0.3}', '{"WMT": 0.2}')""", (snap,))
     conn.execute("INSERT INTO experiment (name, start_date) VALUES ('shakedown', '2026-12-14')")
     conn.commit()
     return conn
@@ -280,7 +284,8 @@ def _old_schema_db(path):
     start = sql.index("    -- added 17 Nov 2026")
     end = sql.index("    CHECK (status <> 'ok' OR parsed_targets IS NOT NULL)")
     old = sql[:start] + sql[end:]
-    assert "reasoning_tokens" not in old
+    decisions = old[old.index("CREATE TABLE IF NOT EXISTS decisions"):old.index("CREATE TABLE IF NOT EXISTS risk_events")]
+    assert "reasoning_tokens" not in decisions
     c = sqlite3.connect(str(path))
     c.executescript(old)
     c.close()

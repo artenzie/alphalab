@@ -35,6 +35,7 @@ APPEND_ONLY_TABLES = (
     "market_sessions",
     "crypto_fill_bars",
     "crypto_fill_windows",
+    "shadow_decisions",
     "experiment",
 )
 ALL_TABLES = ("agents",) + APPEND_ONLY_TABLES

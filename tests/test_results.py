@@ -73,3 +73,28 @@ def test_daily_overlap_uses_risk_checked_targets_and_carries_holds(conn, clients
     assert by_day[d1][("8", "9")] == pytest.approx(0.30)                    # 9's day-1 targets carried
     text = results.report(conn)
     assert "AI target overlap" in text and f"{d0}    10" in text
+
+
+def test_reasoning_summary_and_gate(conn, clients, monkeypatch):
+    import test_runner
+    from runner import roster
+    from test_runner import Client
+    monkeypatch.setattr(roster, "SHADOW_EXPERIMENT", "dev")
+    monkeypatch.setattr(roster, "SHADOW_START", DAYS[0])
+    clients = dict(clients, **{roster.SHADOW_KEY: Client("8")})
+    assert results.reasoning_gate(conn).verdict == "no data"
+    equity_run(conn, DAYS[0], clients)                                     # shadow = agent 8's book
+    g = results.reasoning_gate(conn)
+    assert (g.days, g.verdict) == (1, "high") and g.mean_overlap == pytest.approx(0.40)   # gross 0.4 < 0.6
+    monkeypatch.setitem(test_runner.AI_TARGETS, "8", {"AAPL": 0.2, "NVDA": 0.2, "JPM": 0.2, "XOM": -0.1})
+    equity_run(conn, DAYS[1], clients)
+    g = results.reasoning_gate(conn)
+    assert g.days == 2 and g.per_day[DAYS[1].isoformat()] == pytest.approx(0.70)
+    assert g.mean_overlap == pytest.approx(0.55) and g.verdict == "high"
+    equity_run(conn, DAYS[2], clients)                                     # mean exactly 0.6: not below
+    g = results.reasoning_gate(conn)
+    assert g.days == 3 and g.mean_overlap == pytest.approx(0.60) and g.verdict == "medium"
+    rs = results.reasoning_summary(conn)
+    assert rs["8"] == (3, 0, 0.0)                                          # the fake replies report 0
+    text = results.report(conn)
+    assert "effort medium" in text and "with reasoning   0%" in text
