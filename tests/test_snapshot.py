@@ -496,3 +496,39 @@ def test_cutoffs_match_protocol(conn):
     assert db.utc_ts(sn.cutoff_for(conn, "us_equity", THU)) == "2026-11-19T22:45:00.000Z"      # 17:45 ET
     assert db.utc_ts(sn.cutoff_for(conn, "us_equity", EARLY_FRI)) == "2026-11-27T19:45:00.000Z"  # 14:45 ET
     assert db.utc_ts(sn.cutoff_for(conn, "crypto", THU)) == "2026-11-20T00:10:00.000Z"
+
+
+# ---------------------------------------------------------------------------
+# Late runs (protocol v1.13): cutoff = actual build time, labelled late
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("ac,sym", [("us_equity", "AAPL"), ("crypto", "BTC/USD")])
+def test_late_snapshot_uses_its_build_time_as_cutoff(conn19, ac, sym):
+    proto = cutoff(conn19, ac, THU)
+    add(conn19, sym, THU, 777.0, fetched_at=proto + timedelta(hours=2))      # fetched late
+    on_time = build(conn19, ac, THU, "live")
+    assert on_time.payload["late"] is False and on_time.payload["minutes_late"] == 0
+    assert on_time.payload["symbols"][sym]["last_close"] != 777.0
+    late = build(conn19, ac, THU, "live", cutoff=proto + timedelta(hours=3))
+    p = late.payload
+    assert p["late"] is True and p["minutes_late"] == 180
+    assert p["cutoff_ts"] == db.utc_ts(proto + timedelta(hours=3)) == late.cutoff_ts
+    assert p["symbols"][sym]["last_close"] == 777.0
+    assert p["symbols"][sym]["last_date"] == THU.isoformat()           # still no next-day bar
+    earlier = build(conn19, ac, THU, "live", cutoff=proto + timedelta(hours=1))
+    assert earlier.payload["symbols"][sym]["last_close"] != 777.0       # fetched after this cutoff
+
+
+def test_cutoff_before_the_protocol_cutoff_is_refused(conn19):
+    with pytest.raises(SnapshotError, match="before the protocol cutoff"):
+        build(conn19, "us_equity", THU, "live", cutoff=cutoff(conn19, "us_equity", THU) - timedelta(minutes=1))
+
+
+def test_late_snapshot_is_stored_with_its_cutoff(conn19):
+    late_cut = cutoff(conn19, "us_equity", THU) + timedelta(minutes=95)
+    snap = build(conn19, "us_equity", THU, "live", cutoff=late_cut)
+    sid = sn.store_snapshot(conn19, snap, now=late_cut + timedelta(seconds=5), run_id="r1")
+    row = conn19.execute("SELECT cutoff_ts, payload FROM snapshots WHERE snapshot_id = ?", (sid,)).fetchone()
+    assert row["cutoff_ts"] == db.utc_ts(late_cut)
+    hb = conn19.execute("SELECT detail FROM heartbeat WHERE run_id = 'r1' AND event = 'started'").fetchone()
+    assert json.loads(hb[0])["late"] is True and json.loads(hb[0])["minutes_late"] == 95

@@ -25,6 +25,12 @@ Two modes:
             split adjustment, not what was known on D. It is labelled
             mode='backtest' in its payload and can't be stored.
 
+Late runs (protocol v1.13, §3/§13). A run that missed its schedule passes
+cutoff = the actual build time (later than the protocol cutoff). Every guard
+above then applies at that cutoff, and the payload says late=true with
+minutes_late (whole minutes after the protocol cutoff). A cutoff earlier than
+the protocol's is refused. On time: late=false, minutes_late=0.
+
 Fields per symbol, from split-adjusted closes and volumes (null when history
 is too short):
   last_date, last_close, dates_20, closes_20 (oldest first)
@@ -65,7 +71,7 @@ from data.ingest import (CRYPTO_SYMBOLS, calendar_closes, crypto_bar_closed, equ
                          load_universe)
 
 JOB = "build_snapshot"
-VERSION = 1
+VERSION = 2                    # 2: late / minutes_late (protocol v1.13)
 MODES = ("live", "backtest")
 ASSET_CLASSES = ("us_equity", "crypto")
 HISTORY_DAYS = 252
@@ -247,15 +253,28 @@ def default_symbols(asset_class: str) -> list[str]:
 
 def build_snapshot(conn: sqlite3.Connection, asset_class: str, decision_date: date, mode: str,
                    trading: Any = None, now: datetime | None = None,
-                   symbols: Iterable[str] | None = None) -> Snapshot:
-    """Build the §4 / §13 snapshot for decision_date. See the module docstring."""
+                   symbols: Iterable[str] | None = None, cutoff: datetime | None = None) -> Snapshot:
+    """Build the §4 / §13 snapshot for decision_date. See the module docstring.
+
+    cutoff: a late run's actual build time (v1.13); None = the protocol cutoff.
+    """
     if asset_class not in ASSET_CLASSES:
         raise SnapshotError(f"unknown asset class {asset_class!r}")
     if mode not in MODES:
         raise SnapshotError(f"unknown mode {mode!r}")
     now = now or datetime.now(timezone.utc)
     symbols = sorted(symbols) if symbols is not None else sorted(default_symbols(asset_class))
-    cutoff = cutoff_for(conn, asset_class, decision_date, trading)
+    protocol_cutoff = cutoff_for(conn, asset_class, decision_date, trading)
+    if cutoff is None:
+        cutoff = protocol_cutoff
+    else:
+        if cutoff.tzinfo is None:
+            raise SnapshotError("naive cutoff")
+        if cutoff < protocol_cutoff:
+            raise SnapshotError(f"cutoff {db.utc_ts(cutoff)} is before the protocol cutoff "
+                                f"{db.utc_ts(protocol_cutoff)}")
+        cutoff = cal._parse_ts(db.utc_ts(cutoff))          # the stored precision (ms)
+    minutes_late = int((cutoff - protocol_cutoff).total_seconds() // 60)
     if mode == "backtest" and cutoff > now:
         raise SnapshotError(f"backtest snapshot for {decision_date}: cutoff {db.utc_ts(cutoff)} "
                             f"is in the future; use live mode")
@@ -270,6 +289,8 @@ def build_snapshot(conn: sqlite3.Connection, asset_class: str, decision_date: da
         "decision_date": decision_date.isoformat(),
         "mode": mode,
         "cutoff_ts": db.utc_ts(cutoff),
+        "late": cutoff > protocol_cutoff,
+        "minutes_late": minutes_late,
         "history_sha256": history_sha,
         "symbols": {s: compute_fields(bars[s], asset_class) for s in symbols},
     }
@@ -289,7 +310,7 @@ def _heartbeat(conn, run_id: str, event: str, detail: dict) -> None:
 
 
 def store_snapshot(conn: sqlite3.Connection, snap: Snapshot, trading: Any = None,
-                   now: datetime | None = None) -> int:
+                   now: datetime | None = None, run_id: str | None = None) -> int:
     """Run the data checks as of the cutoff and store a live snapshot. Returns snapshot_id.
 
     A snapshot that fails the checks is still stored, with checks_passed = 0,
@@ -303,9 +324,11 @@ def store_snapshot(conn: sqlite3.Connection, snap: Snapshot, trading: Any = None
     cutoff = cal._parse_ts(snap.cutoff_ts)
     if now < cutoff:
         raise SnapshotError(f"can't store before the cutoff {snap.cutoff_ts}")
-    run_id = uuid.uuid4().hex
+    run_id = run_id or uuid.uuid4().hex
+    p = snap.payload
     _heartbeat(conn, run_id, "started", {"asset_class": snap.asset_class, "date": snap.decision_date,
-                                         "cutoff_ts": snap.cutoff_ts})
+                                         "cutoff_ts": snap.cutoff_ts, "late": p.get("late", False),
+                                         "minutes_late": p.get("minutes_late", 0)})
     try:
         firsts = [h[0].date for h in snap._history.values() if h]
         start = date.fromisoformat(min(firsts)) if firsts else date.fromisoformat(snap.decision_date)

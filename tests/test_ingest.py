@@ -552,3 +552,13 @@ def test_check_warning_after_ingest_exits_0(conn):
     _, event, d = check_events(conn)[-1]
     assert event == "finished" and d["status"] == "warning"
     assert [p["check"] for p in d["problems"]] == ["suspicious_move"]
+
+
+def test_caller_run_id_and_one_asset_class_only(conn):
+    cl = clients()
+    code = ingest.run(conn, cl, data_checks=False, days=5, now=lambda: AFTER_ALL, sleep=lambda s: None,
+                      equity_symbols=[], crypto_symbols=("BTC/USD",), run_id="runner-1")
+    assert code == 0
+    assert {r[0] for r in conn.execute("SELECT run_id FROM heartbeat")} == {"runner-1"}
+    assert cl.stock.requests == []                                     # no equity call at all
+    assert {r["symbol"] for r in prices(conn)} == {"BTC/USD"}

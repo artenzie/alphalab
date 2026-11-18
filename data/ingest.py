@@ -180,6 +180,8 @@ def fetch_equity(clients: Clients, symbols, start: datetime, end: datetime, slee
     from alpaca.data.requests import StockBarsRequest
     from alpaca.data.timeframe import TimeFrame
 
+    if not symbols:
+        return {}, {}
     out = {}
     for adj in (Adjustment.RAW, Adjustment.SPLIT):
         req = StockBarsRequest(symbol_or_symbols=list(symbols), timeframe=TimeFrame.Day,
@@ -193,6 +195,8 @@ def fetch_crypto(clients: Clients, symbols, start: datetime, end: datetime, slee
     from alpaca.data.requests import CryptoBarsRequest
     from alpaca.data.timeframe import TimeFrame
 
+    if not symbols:
+        return {}
     req = CryptoBarsRequest(symbol_or_symbols=list(symbols), timeframe=TimeFrame.Day,
                             start=start, end=end)
     return bars_by_symbol(with_retries(lambda: clients.crypto.get_crypto_bars(req), "crypto bars", sleep))
@@ -488,13 +492,15 @@ def run(conn: sqlite3.Connection, clients: Clients, days: int = 5,
         crypto_symbols=CRYPTO_SYMBOLS,
         start_date: date | None = None,
         chunk_pause: float = CHUNK_PAUSE,
-        data_checks: bool = True) -> int:
+        data_checks: bool = True,
+        run_id: str | None = None) -> int:
     """One ingestion run. Returns a process exit code (0 ok, 1 error).
 
     With `start_date`, backfill from that date (00:00 UTC) instead of `days`.
     With `data_checks`, the checks run afterwards and an error in them gives 1.
+    run_id: the caller's (e.g. the daily runner's), so all its heartbeat rows share one.
     """
-    run_id = uuid.uuid4().hex
+    run_id = run_id or uuid.uuid4().hex
     equity_symbols = equity_symbols if equity_symbols is not None else load_universe()
     start_now = now()
     if start_date is None:

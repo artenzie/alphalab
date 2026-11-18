@@ -164,9 +164,10 @@ def _heartbeat(conn, run_id: str, event: str, detail: dict) -> None:
 
 def run(conn: sqlite3.Connection, clients: Clients, decision_dates: Iterable[date],
         now: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
-        sleep: Callable[[float], None] = time.sleep, symbols=CRYPTO_SYMBOLS) -> int:
+        sleep: Callable[[float], None] = time.sleep, symbols=CRYPTO_SYMBOLS,
+        run_id: str | None = None) -> int:
     """Fetch and store the windows after decision_dates. Returns an exit code (0 ok, 1 error)."""
-    run_id = uuid.uuid4().hex
+    run_id = run_id or uuid.uuid4().hex
     dates = sorted(set(decision_dates))
     _heartbeat(conn, run_id, "started", {"dates": [d.isoformat() for d in dates], "symbols": list(symbols)})
     stats: dict[str, dict] = {}

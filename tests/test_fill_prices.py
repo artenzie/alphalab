@@ -132,3 +132,10 @@ def test_backfill_runs_one_window_per_date(conn):
 def test_last_started_date():
     assert fp.last_started_date(W0 + timedelta(minutes=1)) == D
     assert fp.last_started_date(W0 + timedelta(seconds=30)) == D - timedelta(days=1)
+
+
+def test_caller_run_id(conn):
+    data = {"BTC/USD": minutes(0, 1)}
+    assert fp.run(conn, clients(data), [D], now=lambda: W0 + timedelta(minutes=5), sleep=lambda s: None,
+                  symbols=["BTC/USD"], run_id="runner-2") == 0
+    assert {r[0] for r in conn.execute("SELECT run_id FROM heartbeat")} == {"runner-2"}

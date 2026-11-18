@@ -259,3 +259,17 @@ def test_alpaca_time_handles_naive_et():
     assert c.close.tzinfo is None                                     # as alpaca-py gives it
     assert cal._alpaca_time(date(2026, 7, 2), c.close) == utc(2026, 7, 2, 20)
     assert cal._alpaca_time(date(2026, 7, 2), "13:00") == utc(2026, 7, 2, 17)
+
+
+# --- late-run deadline (protocol v1.13) -----------------------------------------
+
+def test_equity_deadline_is_an_hour_before_the_next_open(cached, offline):
+    # Wed 18 Nov -> Thu 19 Nov open 14:30Z
+    assert cal.decision_deadline("us_equity", date(2026, 11, 18), cached, offline) == utc(2026, 11, 19, 13, 30)
+    # Fri 20 Nov -> Mon 23 Nov; Wed 25 Nov -> Fri 27 Nov (Thanksgiving closed)
+    assert cal.decision_deadline("us_equity", date(2026, 11, 20), cached, offline) == utc(2026, 11, 23, 13, 30)
+    assert cal.decision_deadline("us_equity", date(2026, 11, 25), cached, offline) == utc(2026, 11, 27, 13, 30)
+
+
+def test_crypto_deadline_is_an_hour_before_the_next_decision():
+    assert cal.decision_deadline("crypto", date(2026, 11, 18)) == utc(2026, 11, 19, 23, 15)

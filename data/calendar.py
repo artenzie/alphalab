@@ -322,6 +322,33 @@ def crypto_times(bar_date: date) -> DailyTimes:
     )
 
 
+LATE_MARGIN = timedelta(hours=1)   # protocol v1.13: a late run decides >= 1 h before the next open / decision
+
+
+def next_session(d: date, conn: sqlite3.Connection | None = None, trading: Any = None,
+                 max_days: int = 14) -> Session:
+    """The first NYSE session strictly after d."""
+    for i in range(1, max_days + 1):
+        s = session(d + timedelta(days=i), conn, trading)
+        if s is not None:
+            return s
+    raise CalendarError(f"no session within {max_days} days after {d}")
+
+
+def decision_deadline(asset_class: str, d: date, conn: sqlite3.Connection | None = None,
+                      trading: Any = None) -> datetime:
+    """Latest time a (late) run may decide for day d (protocol v1.13, §3 / §13).
+
+    Equity: 1 hour before the next session's open. Crypto: 1 hour before the
+    next 00:15Z decision, i.e. 23:15Z on d + 1.
+    """
+    if asset_class == "us_equity":
+        return next_session(d, conn, trading).open - LATE_MARGIN
+    if asset_class == "crypto":
+        return crypto_times(d + timedelta(days=1)).decide_at - LATE_MARGIN
+    raise ValueError(f"unknown asset class {asset_class!r}")
+
+
 # ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
