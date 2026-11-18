@@ -622,3 +622,50 @@ def test_default_dates(conn):
     assert daily.default_date("us_equity", before_fetch + timedelta(minutes=1), conn) == fri
     assert daily.default_date("crypto", datetime(2026, 11, 21, 0, 4, tzinfo=UTC), conn) == date(2026, 11, 19)
     assert daily.default_date("crypto", datetime(2026, 11, 21, 0, 5, tzinfo=UTC), conn) == date(2026, 11, 20)
+
+
+def test_crypto_agent_deciding_after_the_days_orders_were_placed_is_missed(conn, clients, monkeypatch):
+    """C1 fails to settle in the first run, so only C0 decides and places (t_ref fixed). A rerun an hour
+    later settles and decides C1: it is missed for the day (no order, labelled late), no second t_ref."""
+    real = LD.settle_day
+
+    def flaky(conn_, agent_id, *a, **kw):
+        if agent_id == "C1":
+            raise LD.PriceNotAvailable("BTC/USD bar not stored yet")
+        return real(conn_, agent_id, *a, **kw)
+
+    monkeypatch.setattr(LD, "settle_day", flaky)
+    r1, _ = crypto_run(conn, START, clients)
+    assert r1.agents["C0"].placed == "placed" and r1.agents["C1"].settle == "error"
+    t_ref = conn.execute("SELECT DISTINCT created_at FROM orders").fetchall()
+    assert len(t_ref) == 1
+    monkeypatch.setattr(LD, "settle_day", real)
+    r2, _ = crypto_run(conn, START, clients, at=cal.crypto_times(START).decide_at + timedelta(hours=1))
+    assert r2.agents["C1"].settle == "settled" and r2.agents["C1"].placed == "missed"
+    assert r2.agents["C0"].placed == "already_placed"
+    c1 = conn.execute("SELECT * FROM decisions WHERE agent_id = 'C1'").fetchall()
+    assert len(c1) == 1 and c1[0]["decided_at"] > t_ref[0][0]               # decision logged, not traded
+    assert conn.execute("SELECT COUNT(*) FROM orders WHERE agent_id = 'C1'").fetchone()[0] == 0
+    assert conn.execute("SELECT DISTINCT created_at FROM orders").fetchall() == t_ref
+    hb = {j: (e, d) for j, e, d in heartbeat(conn, r2.run_id)}
+    assert hb["crypto_t_ref"][1]["t_ref"] == t_ref[0][0] and hb["crypto_t_ref"][1]["missed"] == ["C1"]
+    assert hb["place_orders:C1"][0] == "error" and hb["place_orders:C1"][1]["late"] is True
+    r3, _ = crypto_run(conn, START, clients, at=cal.crypto_times(START).decide_at + timedelta(hours=2))
+    assert r3.agents["C1"].placed == "missed" and counts(conn)["orders"] == 1   # a third run: still missed
+
+
+def test_crypto_placement_failure_is_resumed_at_the_days_t_ref(conn, clients, monkeypatch):
+    """C1 decided in the first run but its placement failed: the rerun places it at the same t_ref."""
+    real = LD.place_orders
+
+    def flaky(conn_, agent_id, *a, **kw):
+        if agent_id == "C1":
+            raise RuntimeError("disk full")
+        return real(conn_, agent_id, *a, **kw)
+
+    monkeypatch.setattr(LD, "place_orders", flaky)
+    crypto_run(conn, START, clients)
+    monkeypatch.setattr(LD, "place_orders", real)
+    r2, _ = crypto_run(conn, START, clients, at=cal.crypto_times(START).decide_at + timedelta(hours=1))
+    assert r2.agents["C1"].placed == "placed"
+    assert len(conn.execute("SELECT DISTINCT created_at FROM orders").fetchall()) == 1

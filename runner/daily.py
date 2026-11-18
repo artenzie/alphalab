@@ -23,6 +23,8 @@ the BTC buy-and-hold control included: the time the run's last crypto decision w
 recorded (decisions.decided_at), never the scheduled 00:15Z. So the crypto orders are
 placed only after every crypto agent has decided, all with created_at = t_ref, and the
 next day's step 0 fetches the window [t_ref, t_ref + 60 min) (rounded up to the minute).
+Once a day's crypto orders are placed, its t_ref is fixed: an agent that decides after it (in
+a rerun) is missed for the day (no order, labelled late), never given a second t_ref.
 
 Late runs (protocol v1.13). If the data step finishes after the protocol snapshot time,
 the run is late: it doesn't wait, the snapshot's cutoff is its actual build time and it
@@ -588,14 +590,33 @@ class _Day:
         last = self.conn.execute(f"SELECT MAX(decided_at) FROM decisions WHERE decision_id IN ({names})",
                                  [did for _, did, _ in self.deferred]).fetchone()[0]
         t_ref = cal._parse_ts(last)
-        earlier = [r[0] for r in self.conn.execute(
+        placed_at = [r[0] for r in self.conn.execute(
             f"""SELECT DISTINCT created_at FROM orders WHERE venue = 'ledger' AND agent_id IN
-                ({", ".join("?" * len(self.ids))}) AND created_at >= ? AND created_at < ? AND created_at <> ?""",
-            [*self.ids, db.utc_ts(window[0]), db.utc_ts(window[1]), last])]
-        self.hb("crypto_t_ref", "error" if earlier else "finished", t_ref=last,
-                fill_from=db.utc_ts(LD.ceil_minute(t_ref)), agents=[a for a, _, _ in self.deferred],
-                **({"other_t_refs_today": earlier,
-                    "note": "an earlier run placed other crypto agents at a different time"} if earlier else {}))
+                ({", ".join("?" * len(self.ids))}) AND created_at >= ? AND created_at < ? ORDER BY created_at""",
+            [*self.ids, db.utc_ts(window[0]), db.utc_ts(window[1])])]
+        if placed_at:
+            # The day's t_ref is already fixed by orders an earlier run placed. An agent that decided
+            # after it is missed for the day (no order, labelled late), never a second t_ref; one that
+            # decided by then (its placement failed earlier) is placed at the day's t_ref.
+            day_ref = placed_at[0]
+            decided = {did: r[0] for did in (d for _, d, _ in self.deferred)
+                       for r in [self.conn.execute("SELECT decided_at FROM decisions WHERE decision_id = ?",
+                                                   (did,)).fetchone()]}
+            missed = [a for a, did, _ in self.deferred if decided[did] > day_ref]
+            self.hb("crypto_t_ref", "finished", t_ref=day_ref, fixed_by="orders placed by an earlier run",
+                    missed=missed)
+            for aid, did, weights in self.deferred:
+                if aid in missed:
+                    self.report.agents[aid].placed = "missed"
+                    self.hb(f"place_orders:{aid}", "error", agent_id=aid, status="missed", late=True,
+                            t_ref=day_ref, decided_at=decided[did],
+                            reason="decided after the day's crypto orders were placed: no trade today "
+                                   "(§7 rule 4, v1.13)")
+                else:
+                    self._place(aid, did, weights, closes, deadline, created_at=cal._parse_ts(day_ref))
+            return
+        self.hb("crypto_t_ref", "finished", t_ref=last, fill_from=db.utc_ts(LD.ceil_minute(t_ref)),
+                agents=[a for a, _, _ in self.deferred])
         for aid, did, weights in self.deferred:
             self._place(aid, did, weights, closes, deadline, created_at=t_ref)
 
