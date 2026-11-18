@@ -31,6 +31,8 @@ AlphaLab is a research project that runs AI trading agents against Alpaca **pape
 | `agents/llm.py` | `LLMClient` interface, `FakeClient` for tests |
 | `agents/models.py` | Frozen §8 model lineup as data (agent → model, endpoints, reasoning, temperature) |
 | `agents/openrouter.py` | `OpenRouterClient`: pinned endpoints, no fallbacks, error mapping, key never logged |
+| `runner/daily.py` | `python -m runner.daily equity\|crypto --experiment NAME [--date D]`: one trading day in protocol order (ingest → settle → snapshot → decide → risk → orders), restart-safe, heartbeat per step, late runs (v1.13) |
+| `runner/experiment.py`, `runner/roster.py` | One DB file per experiment (`data/<name>.db`, labelled; `create` copies market data, empty ledger); which agents run and how they're built |
 | `agents/prompts/`, `analysis/`, `dashboard/` | Not built yet (prompts Sat 5 Dec) |
 
 ## Working here
