@@ -1,6 +1,6 @@
 # Experiment protocol
 
-**Version:** v1.12, Tue 17 Nov 2026 (Gate 1 + crypto timings + day-1 decisions + agent 4/5 clarifications + agent 4 capacity, pro rata clipping + ledger rules + cash floor + dust buys + complete targets + AI targets stocks only + AI call settings + reasoning described + crypto fill price)
+**Version:** v1.13, Wed 18 Nov 2026 (Gate 1 + crypto timings + day-1 decisions + agent 4/5 clarifications + agent 4 capacity, pro rata clipping + ledger rules + cash floor + dust buys + complete targets + AI targets stocks only + AI call settings + reasoning described + crypto fill price + late runs, one database per experiment)
 **Next:** final freeze as `protocol-v2.0` on Sun 10 Jan 2027, after the shakedown.
 
 All numbers were approved at the Gate 1 review on Sat 14 Nov 2026. The universe and model lineup were filled in from the Gate 1 scripts the same evening. Everything follows from decisions D1–D9 in `research/decisions.md`.
@@ -63,9 +63,11 @@ Fifteen equity agents (6 rule-based, 9 AI) each start with the same virtual capi
 
 On early-close days the schedule runs from the early close. On market holidays nothing runs.
 
+**Late runs** (v1.13). If a scheduled run is missed, the runner may run late, as long as the agents decide at least 1 hour before the next session's open. In a late run the snapshot's cutoff is the time it is actually built (not close + 1:45), and the snapshot is labelled late with the minutes late; a heartbeat records it. Data rules, fill timing and everything else are unchanged. After that deadline the day is a hold for every agent: the ledger still settles and marks, and the margin check still runs.
+
 ## 4 · The snapshot (no future data)
 
-One snapshot per day, identical for every agent. It is built by a single function that can only read bars **timestamped at or before the close of the decision day** (CLAUDE.md rule 1), and tests must prove it cannot see the next day.
+One snapshot per day, identical for every agent. It is built by a single function that can only read bars **timestamped at or before the close of the decision day** (CLAUDE.md rule 1), and tests must prove it cannot see the next day. Its cutoff is the protocol snapshot time (§3, §13), or the actual build time in a late run (§3).
 
 **For each of the 23 symbols:**
 - Last close, and the last 20 closes
@@ -187,7 +189,7 @@ Every call is logged: prompt hash, model ID, the provider that actually served i
 
 ## 9 · Logging (append-only)
 
-One SQLite database. Nothing is ever edited or deleted (CLAUDE.md rule 2); corrections are new rows that reference the original.
+One SQLite database file per experiment (v1.13): the shakedown and the official run each have their own, labelled with the experiment's name and start date, and every ledger starts empty at $100,000 per agent. Nothing is ever edited or deleted (CLAUDE.md rule 2); corrections are new rows that reference the original.
 
 | Table | One row per |
 |---|---|
@@ -238,7 +240,7 @@ Reported separately. Never ranked or tested against the equity agents.
 | Coins | BTC, ETH, SOL, XRP, DOGE against USD (Alpha Arena's set minus BNB). Availability on Alpaca confirmed in Phase 1 |
 | Capital | $100,000 each |
 | Decisions | Once a day after the 00:00 UTC daily bar closes; filled at the open of the first 1-minute bar at or after the decision time (§7 rule 4) |
-| Daily timings (UTC) | Every day, after the bar for day D closes at 00:00Z on D+1: **00:05Z** pull the final daily bars; **00:10Z** build and store the snapshot; **00:15Z** C0/C1 decide. UTC is used throughout, so US/UK clock changes don't move these times |
+| Daily timings (UTC) | Every day, after the bar for day D closes at 00:00Z on D+1: **00:05Z** pull the final daily bars; **00:10Z** build and store the snapshot; **00:15Z** C0/C1 decide. UTC is used throughout, so US/UK clock changes don't move these times. A missed run may run late (as §3), deciding at least 1 hour before the next 00:15Z decision, i.e. by 23:15Z on D+1 |
 | C1 limits | Long only (Alpaca crypto can't be shorted or bought on margin); max 50% in one coin; may hold cash |
 | C1 instruction | Aim for the highest return it can within the limits |
 | C1 sees | The same kind of snapshot as the equity agents (returns, moving averages, volatility, z-scores) for the 5 coins, plus its own portfolio |
@@ -264,3 +266,4 @@ Reported separately. Never ranked or tested against the equity agents.
 - **v1.10** · Tue 17 Nov 2026 · §8 call settings, fixed before the OpenRouter client was coded. (1) Each model is pinned to its provider's standard endpoint, not flex/fast/priority tiers, and unsupported parameters are rejected rather than dropped. (2) Max output 16,000 tokens for all five, reasoning included, so a runaway reasoning trace can't run up the bill; a cut-off reply is invalid. (3) Reasoning effort **medium** for all five, replacing "each model's default". Fairness: the defaults differ by maker (some models reason by default, others answer without reasoning unless asked), so "default" would have compared reasoning models with non-reasoning ones and confounded the model comparison with a setting. One explicit level puts every model on the same footing. Temperature is unchanged: 0 where accepted (Gemini, DeepSeek, Grok); Claude and GPT accept none, so it isn't sent and is recorded as the provider default. (4) A reply reporting a model other than the requested ID or a dated variant of it is invalid, like a wrong provider; both IDs are logged.
 - **v1.11** · Tue 17 Nov 2026 · §8 Reasoning row describes what effort medium actually does; the setting is unchanged (medium for all five). Claude Sonnet 5.5 uses adaptive thinking (OpenRouter: reasoning mandatory, default effort high): at medium it reasoned on a hard puzzle (1,480 tokens) but not on the 13 Nov trading prompt (0), and reasoned on that prompt at high (327). The response showed no reasoning at all (null, 0 billed reasoning tokens), not reasoning that was hidden. Medium was kept so every model gets the same instruction; how often each chooses to reason is measured, not tuned. Reasoning tokens are logged per call. Diagnostic in the 17 Nov log.
 - **v1.12** · Tue 17 Nov 2026 · §7 rule 4, rule 11, §9, §13: the crypto fill price, fixed before the crypto fill was coded. A crypto order fills at the open of the first 1-minute bar starting at or after the later of 00:15Z and the time the orders were written (rounded up to the minute), plus the 0.25% fee and 5 bps, so a fill never predates its order (an AI call can return after 00:15Z). The minute bars from 00:15Z to 01:15Z are stored in a separate append-only table `crypto_fill_bars`, only once closed, and never enter a snapshot. For crypto, day D+1 fills decision D and marks at D+1's daily close. Noted: with the fee on top, the cash floor scales every 100% crypto buy. No number changed.
+- **v1.13** · Wed 18 Nov 2026 · §3, §4, §9, §13: (1) Late runs. A missed scheduled run may run late if the agents decide at least 1 hour before the next session's open (equity) or the next 00:15Z decision (crypto). In a late run the snapshot cutoff is its actual build time and the snapshot is labelled late with the minutes late (a heartbeat records it); data rules and fill timing are unchanged. Past the deadline the day is a hold for every agent, as before. Previously a late run's snapshot excluded bars fetched after the protocol cutoff, failed the stale check, and the day was lost. (2) One database file per experiment (shakedown, official), each labelled with its name and start date, so the official run starts every ledger at $100,000 on Mon 11 Jan with no shakedown rows in it. Decided with the daily runner.
