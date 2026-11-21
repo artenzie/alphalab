@@ -485,6 +485,23 @@ def build_rows(equity_raw, equity_split, crypto, now: datetime, stats: Stats,
     return rows
 
 
+def first_missing_day(conn: sqlite3.Connection, symbols: list[str]) -> datetime | None:
+    """00:00 UTC of the day after the oldest of each symbol's last stored bar; None if none stored.
+
+    A recent run that would start after this would leave a hole, so it starts here minus its
+    usual overlap instead. Symbols with no bar at all are left to a backfill (start_date).
+    """
+    if not symbols:
+        return None
+    names = ", ".join("?" * len(symbols))
+    rows = conn.execute(f"SELECT symbol, MAX(bar_date) FROM prices WHERE symbol IN ({names}) GROUP BY symbol",
+                        list(symbols)).fetchall()
+    if not rows:
+        return None
+    d = min(date.fromisoformat(r[1]) for r in rows) + timedelta(days=1)
+    return datetime(d.year, d.month, d.day, tzinfo=timezone.utc)
+
+
 def run(conn: sqlite3.Connection, clients: Clients, days: int = 5,
         now: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
         sleep: Callable[[float], None] = time.sleep,
@@ -496,21 +513,31 @@ def run(conn: sqlite3.Connection, clients: Clients, days: int = 5,
         run_id: str | None = None) -> int:
     """One ingestion run. Returns a process exit code (0 ok, 1 error).
 
-    With `start_date`, backfill from that date (00:00 UTC) instead of `days`.
+    With `start_date`, backfill from that date (00:00 UTC) instead of `days`. Without it, the run
+    starts `days` back; if a symbol's first missing day (the day after its last stored bar) is
+    older than that, it starts there minus the same `days` of overlap, so an outage leaves no holes.
+    Rule 1 is unaffected: every row's fetched_at is the real fetch time.
     With `data_checks`, the checks run afterwards and an error in them gives 1.
     run_id: the caller's (e.g. the daily runner's), so all its heartbeat rows share one.
     """
     run_id = run_id or uuid.uuid4().hex
     equity_symbols = equity_symbols if equity_symbols is not None else load_universe()
     start_now = now()
+    resume_from = None
     if start_date is None:
         start = (start_now - timedelta(days=days)).replace(hour=0, minute=0, second=0, microsecond=0)
+        first_missing = first_missing_day(conn, list(equity_symbols) + list(crypto_symbols))
+        if first_missing is not None and first_missing < start:
+            # a long outage: back to the first missing day, minus the usual overlap, so no holes
+            resume_from = first_missing - timedelta(days=days)
+            start = resume_from
     else:
         start = datetime(start_date.year, start_date.month, start_date.day, tzinfo=timezone.utc)
     chunks = chunk_ranges(start, start_now)
     heartbeat(conn, run_id, "started", {
         "mode": "recent" if start_date is None else "backfill",
         "days": days if start_date is None else None, "start": db.utc_ts(start),
+        "resume_from": None if resume_from is None else db.utc_ts(resume_from),
         "chunks": [[db.utc_ts(a), db.utc_ts(b)] for a, b in chunks],
         "equity": len(equity_symbols), "crypto": len(crypto_symbols)})
     stats = Stats()

@@ -562,3 +562,55 @@ def test_caller_run_id_and_one_asset_class_only(conn):
     assert {r[0] for r in conn.execute("SELECT run_id FROM heartbeat")} == {"runner-1"}
     assert cl.stock.requests == []                                     # no equity call at all
     assert {r["symbol"] for r in prices(conn)} == {"BTC/USD"}
+
+
+# --- resume from the last stored bar (a long outage leaves no holes) ----------
+
+def _days_bars(first, n, crypto=False):
+    out = []
+    for i in range(n):
+        d = first + timedelta(days=i)
+        if crypto:
+            out.append(bar(datetime(d.year, d.month, d.day, tzinfo=UTC), close=70000.0 + i))
+        elif d.weekday() < 5:
+            out.append(bar(datetime(d.year, d.month, d.day, 5, tzinfo=UTC), close=100.0 + i))
+    return out
+
+
+def test_ten_day_gap_backfills_with_no_holes(conn):
+    first = date(2026, 10, 26)
+    raw = {"AAPL": _days_bars(first, 40)}
+    cr = {"BTC/USD": _days_bars(first, 40, crypto=True)}
+    cl = clients(raw=raw, crypto=cr)
+    # stored up to Fri 6 Nov (equity) / Sat 7 Nov (crypto), then the Pi was off for 10 days
+    t1 = datetime(2026, 11, 8, 1, tzinfo=UTC)
+    assert ingest.run(conn, cl, data_checks=False, days=5, now=lambda: t1, sleep=lambda s: None,
+                      equity_symbols=["AAPL"], crypto_symbols=("BTC/USD",), start_date=first) == 0
+    t2 = t1 + timedelta(days=10)
+    assert ingest.run(conn, cl, data_checks=False, days=5, now=lambda: t2, sleep=lambda s: None,
+                      equity_symbols=["AAPL"], crypto_symbols=("BTC/USD",)) == 0
+    eq = [r[0] for r in conn.execute("SELECT DISTINCT bar_date FROM prices WHERE symbol = 'AAPL' ORDER BY 1")]
+    want = [d.isoformat() for d in weekdays(first, date(2026, 11, 17))]
+    assert eq == want                                                  # every weekday, no hole
+    btc = [r[0] for r in conn.execute("SELECT DISTINCT bar_date FROM prices WHERE symbol = 'BTC/USD' ORDER BY 1")]
+    assert btc == [(first + timedelta(days=i)).isoformat() for i in range((date(2026, 11, 17) - first).days + 1)]
+    started = [d for e, d in events(conn) if e == "started"][-1]
+    # resumed from the first missing day (Sat 7 Nov, after Fri 6 Nov) - 5 days of overlap = Mon 2 Nov
+    assert started["resume_from"] == "2026-11-02T00:00:00.000Z" and started["start"] == "2026-11-02T00:00:00.000Z"
+    # rule 1: the backfilled bars carry the real fetch time of the second run
+    fetched = {r[0] for r in conn.execute("SELECT fetched_at FROM prices WHERE bar_date > '2026-11-07'")}
+    assert fetched == {db.utc_ts(t2)}
+
+
+def test_recent_run_without_a_gap_keeps_the_5_day_window(conn):
+    first = date(2026, 11, 2)
+    cl = clients(raw={"AAPL": _days_bars(first, 20)}, crypto={"BTC/USD": _days_bars(first, 20, crypto=True)})
+    t = datetime(2026, 11, 10, 1, tzinfo=UTC)
+    kw = dict(data_checks=False, days=5, sleep=lambda s: None, equity_symbols=["AAPL"], crypto_symbols=("BTC/USD",))
+    ingest.run(conn, cl, now=lambda: t, start_date=first, **kw)
+    ingest.run(conn, cl, now=lambda: t + timedelta(days=1), **kw)
+    started = [d for e, d in events(conn) if e == "started"][-1]
+    assert started["start"] == "2026-11-06T00:00:00.000Z"             # now - 5 days, as before
+    assert started["resume_from"] is None
+    assert ingest.first_missing_day(conn, []) is None
+    assert ingest.first_missing_day(conn, ["NOPE"]) is None             # a never-stored symbol doesn't pull it back
