@@ -28,14 +28,15 @@ def test_assembled_as_the_readme_says():
     for a, g in goals.items():
         assert templates.load(a) == common + "\n\n" + read(g)
     assert templates.load("C1") == read("crypto_c1.md")
-    assert set(templates.TEMPLATE_FILES) == {*EQUITY, "C1"}          # 13 is wired in separately
+    assert templates.load("13") == read("agent_13_blender.md")
+    assert set(templates.TEMPLATE_FILES) == {*EQUITY, "13", "C1"}
 
 
 def test_autonomous_byte_identical_and_others_differ():
     t8 = templates.load("8").encode("utf-8")
     for a in ("9", "10", "11", "12"):
         assert templates.load(a).encode("utf-8") == t8
-    assert len({templates.load(a) for a in ("7", "8", "14", "15", "C1")}) == 5
+    assert len({templates.load(a) for a in ("7", "8", "13", "14", "15", "C1")}) == 6
 
 
 def test_no_trailing_whitespace_and_utf8():
@@ -59,7 +60,7 @@ def test_hashes_available():
     for a, h in hashes.items():
         assert h == hashlib.sha256(templates.load(a).encode("utf-8")).hexdigest() == harness.sha256(templates.load(a))
     assert len({hashes[a] for a in ("8", "9", "10", "11", "12")}) == 1
-    assert len(set(hashes.values())) == 5
+    assert len(set(hashes.values())) == 6
 
 
 def test_roster_uses_the_real_templates():
@@ -71,7 +72,7 @@ def test_roster_uses_the_real_templates():
 
 def test_unknown_agent():
     with pytest.raises(KeyError):
-        templates.load("13")
+        templates.load("99")
 
 
 def test_cli_prints_every_hash(capsys):

@@ -90,10 +90,13 @@ class PastDecision:
     targets: Mapping[str, float] | None          # None = hold
     reasons: Mapping[str, str] = field(default_factory=dict)
     reasoning: str = ""
+    allocation: Mapping[str, float] | None = None   # agent 13 (v1.16): the allocation it set; None = hold
 
     def __post_init__(self) -> None:
         if self.targets is not None:
             object.__setattr__(self, "targets", MappingProxyType(dict(self.targets)))
+        if self.allocation is not None:
+            object.__setattr__(self, "allocation", MappingProxyType(dict(self.allocation)))
         object.__setattr__(self, "reasons", MappingProxyType(dict(self.reasons)))
 
 
@@ -110,6 +113,10 @@ class AgentMemory:
     last_decisions: tuple[PastDecision, ...] = ()
     end_date: date | None = None
     trading_days_left: int | None = None
+    # agent 13 only (v1.16): input.strategies (per agent 3-6: weights after its decision today, and
+    # stats from its marks up to the decision date) and its current allocation (None = none yet)
+    strategies: Mapping[str, Mapping] | None = None
+    allocation: Mapping[str, float] | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "avg_cost", MappingProxyType(dict(self.avg_cost)))

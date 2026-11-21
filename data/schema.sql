@@ -136,6 +136,8 @@ CREATE TABLE IF NOT EXISTS decisions (
     -- added 17 Nov 2026 (§8 v1.11); last so a fresh table matches one upgraded by
     -- ALTER TABLE ADD COLUMN (db.COLUMN_UPGRADES). Part of tokens_out; NULL = not reported
     reasoning_tokens  INTEGER CHECK (reasoning_tokens IS NULL OR (reasoning_tokens >= 0 AND (tokens_out IS NULL OR reasoning_tokens <= tokens_out))),
+    -- added 21 Nov 2026 (§5 v1.16): agent 13's allocation {"3": a, "4": a, "5": a, "6": a}; NULL otherwise
+    parsed_allocation TEXT CHECK (parsed_allocation IS NULL OR json_valid(parsed_allocation)),
     CHECK (status <> 'ok' OR parsed_targets IS NOT NULL)
 );
 CREATE UNIQUE INDEX IF NOT EXISTS ux_decisions_attempt

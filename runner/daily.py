@@ -648,6 +648,7 @@ class _Day:
             for i, a in enumerate(record.attempts):
                 row = a.row()
                 row.pop("reasoning_setting", None)
+                row.pop("parsed_allocation", None)              # agent 8's shadow: never an allocation
                 _insert(self.conn, "shadow_decisions", {
                     "shadow_of": roster.SHADOW_OF, "snapshot_id": sid, "decided_at": ts,
                     "reasoning_setting": a.reasoning_setting, **row,

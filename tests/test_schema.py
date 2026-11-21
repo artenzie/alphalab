@@ -291,8 +291,8 @@ def _old_schema_db(path):
     c.close()
 
 
-def test_fresh_db_has_reasoning_tokens_last(conn):
-    assert _columns(conn)[-1][0] == "reasoning_tokens"
+def test_fresh_db_has_the_upgraded_columns_last(conn):
+    assert [c[0] for c in _columns(conn)[-2:]] == ["reasoning_tokens", "parsed_allocation"]   # v1.11, v1.16
 
 
 def test_init_db_upgrades_old_decisions_table(tmp_path):

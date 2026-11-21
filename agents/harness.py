@@ -50,6 +50,13 @@ key is max_per_coin, and an unknown symbol's error names the coins. Long only
 and the 50% cap are enforced by the risk checks (profile 'C1'), not here. The
 equity prompt is byte-for-byte what it was. A crypto agent (C0, C1) only
 accepts a crypto snapshot and an equity agent only an equity one.
+
+Agent 13, the blender (§5, v1.16): OUTPUT_SPEC_BLENDER, a reply of hold or an
+allocation over agents 3-6 (parse_allocation). Its input adds strategies and
+allocation (context.memory); its last decisions show allocations. The AIDecision
+weights are the book, blend(allocation, strategies): the allocation times the
+strategy weights it was shown. A hold is None; whether a hold still follows the
+strategies' trades is the runner's job.
 """
 
 from __future__ import annotations
@@ -59,7 +66,7 @@ import json
 import math
 import re
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Callable, Mapping, Sequence
 
@@ -103,6 +110,22 @@ Rules:
 - confidence is a number from 0 to 1.
 - Your limits are in the input; positions beyond them are cut back pro rata."""
 
+OUTPUT_SPEC_BLENDER = """\
+OUTPUT FORMAT
+Reply with one JSON object and nothing else (a ```json fenced block is also accepted). Either:
+  {"action": "hold", "reasoning": "<why>"}
+to keep your current allocation, or:
+  {"action": "allocate", "allocation": {"3": <w>, "4": <w>, "5": <w>, "6": <w>}, "reasoning": "<overall reasoning>", "confidence": <0 to 1>}
+Rules:
+- allocation names all four strategies, "3", "4", "5" and "6", and nothing else.
+- Each weight is from 0 to 0.70, and the four add up to 1.
+- confidence is a number from 0 to 1."""
+
+BLENDER_ID = "13"                       # §5 v1.16: allocates across agents 3-6
+BLEND_OF = ("3", "4", "5", "6")
+MAX_ALLOCATION = 0.70
+ALLOCATION_SUM_TOL = 1e-6
+
 CRYPTO_AGENT_IDS = frozenset({"C0", "C1"})
 ELIGIBLE_AGENTS = frozenset({"7"})      # §5 v1.15: may only target today's top 5 by ret_63
 
@@ -130,6 +153,23 @@ def _r(x: float) -> float:
 # ---------------------------------------------------------------------------
 # Prompt
 # ---------------------------------------------------------------------------
+
+def _past_blender(d: PastDecision) -> dict:
+    return {"date": d.decision_date.isoformat(), "status": d.status,
+            "action": "hold" if d.allocation is None else "allocate",
+            "allocation": None if d.allocation is None else {k: _r(v) for k, v in sorted(d.allocation.items())},
+            "reasoning": d.reasoning}
+
+
+def blend(allocation: Mapping[str, float], strategies: Mapping[str, Mapping]) -> dict[str, float]:
+    """Agent 13's book (§5 v1.16): sum over k of allocation[k] x agent k's weights."""
+    book: dict[str, float] = {}
+    for k in BLEND_OF:
+        a = allocation[k]
+        for sym, w in strategies[k]["weights"].items():
+            book[sym] = book.get(sym, 0.0) + a * w
+    return {s: w for s, w in sorted(book.items()) if w != 0}
+
 
 def _past(d: PastDecision) -> dict:
     return {"date": d.decision_date.isoformat(), "status": d.status,
@@ -177,6 +217,13 @@ def prompt_input(agent_id: int | str, snapshot: "Snapshot", portfolio: Portfolio
     lim = profile(agent_id)
     eligible = eligible_for(agent_id, snapshot)
     extra = {} if eligible is None else {"eligible": eligible}
+    blender = str(agent_id) == BLENDER_ID
+    if blender:
+        if memory.strategies is None or set(memory.strategies) != set(BLEND_OF):
+            raise ValueError("agent 13 needs input.strategies for agents 3-6 (context.memory, v1.16)")
+        extra["strategies"] = {k: dict(memory.strategies[k]) for k in BLEND_OF}
+        extra["allocation"] = (None if memory.allocation is None
+                               else {k: _r(memory.allocation[k]) for k in BLEND_OF})
     return {
         "date": context.decision_date.isoformat(),
         "snapshot": symbols,
@@ -188,7 +235,7 @@ def prompt_input(agent_id: int | str, snapshot: "Snapshot", portfolio: Portfolio
         },
         "limits": {("max_per_coin" if crypto else "max_per_stock"): lim.max_per_stock, "shorts_allowed": lim.shorts,
                    "max_gross": lim.max_gross, "max_total_short": lim.max_total_short},
-        "last_decisions": [_past(d) for d in past[-LAST_DECISIONS:]],
+        "last_decisions": [(_past_blender if blender else _past)(d) for d in past[-LAST_DECISIONS:]],
         "run": {"end_date": memory.end_date.isoformat(), "trading_days_left": int(memory.trading_days_left)},
         **extra,
     }
@@ -196,7 +243,8 @@ def prompt_input(agent_id: int | str, snapshot: "Snapshot", portfolio: Portfolio
 
 def build_prompt(template: str, agent_id: int | str, snapshot: "Snapshot", portfolio: Portfolio,
                  context: Context) -> str:
-    spec = OUTPUT_SPEC_CRYPTO if _check_asset_class(agent_id, snapshot) == "crypto" else OUTPUT_SPEC
+    crypto = _check_asset_class(agent_id, snapshot) == "crypto"
+    spec = OUTPUT_SPEC_CRYPTO if crypto else OUTPUT_SPEC_BLENDER if str(agent_id) == BLENDER_ID else OUTPUT_SPEC
     return (template.rstrip() + "\n\n" + spec + "\n\nINPUT\n"
             + _compact(prompt_input(agent_id, snapshot, portfolio, context)))
 
@@ -215,6 +263,7 @@ class Parsed:
     reasons: Mapping[str, str] | None
     reasoning: str
     confidence: float | None
+    allocation: Mapping[str, float] | None = None   # agent 13 (v1.16)
 
 
 _FENCE = re.compile(r"```(?:json|JSON)?[ \t]*\n?(.*?)```", re.DOTALL)
@@ -237,12 +286,8 @@ def _number(x) -> bool:
     return not isinstance(x, bool) and isinstance(x, (int, float)) and math.isfinite(x)
 
 
-def parse_and_validate(text: str, universe: Sequence[str], asset_class: str = "us_equity",
-                       eligible: Sequence[str] | None = None) -> Parsed:
-    """Parse the reply and check it against the §8 format. Raises OutputError.
-
-    eligible (agent 7, v1.15): a non-zero weight outside it is invalid; exactly 0 is allowed (a sale).
-    """
+def _load_object(text: str) -> dict:
+    """One JSON object, bare or in one ```json block; duplicate keys and NaN/Infinity rejected."""
     if not isinstance(text, str) or not text.strip():
         raise OutputError("empty reply")
     body = text.strip()
@@ -260,6 +305,56 @@ def parse_and_validate(text: str, universe: Sequence[str], asset_class: str = "u
         raise OutputError(f"not valid JSON: {e}") from None
     if not isinstance(obj, dict):
         raise OutputError("reply must be a JSON object")
+    return obj
+
+
+def parse_allocation(text: str) -> Parsed:
+    """Agent 13's reply (OUTPUT_SPEC_BLENDER, v1.16): hold, or an allocation over "3"-"6". Raises OutputError.
+
+    Keys exactly "3", "4", "5", "6"; each weight finite and in [0, 0.70]; the sum within 1e-6 of 1.
+    Parsed.targets is left None here: the book is computed from the allocation by the caller.
+    """
+    obj = _load_object(text)
+    reasoning = obj.get("reasoning")
+    if not isinstance(reasoning, str) or not reasoning.strip():
+        raise OutputError("reasoning must be a non-empty string")
+    confidence = obj.get("confidence")
+    if confidence is not None and not (_number(confidence) and 0 <= confidence <= 1):
+        raise OutputError(f"confidence must be a number from 0 to 1, got {confidence!r}")
+    action = obj.get("action")
+    if action == "hold":
+        if "allocation" in obj:
+            raise OutputError("a hold has no allocation; use action 'allocate' to change it")
+        return Parsed(None, None, reasoning, None if confidence is None else float(confidence))
+    if action != "allocate":
+        raise OutputError(f"action must be 'hold' or 'allocate', got {action!r}")
+    alloc = obj.get("allocation")
+    if not isinstance(alloc, dict):
+        raise OutputError('allocation must be an object {"3": w, "4": w, "5": w, "6": w}')
+    if set(alloc) != set(BLEND_OF):
+        raise OutputError(f'allocation must name exactly "3", "4", "5" and "6", got {sorted(alloc)}')
+    for k in BLEND_OF:
+        w = alloc[k]
+        if not _number(w):
+            raise OutputError(f"weight for {k} must be a finite number, got {w!r}")
+        if not 0 <= w <= MAX_ALLOCATION:
+            raise OutputError(f"weight for {k} must be from 0 to {MAX_ALLOCATION}, got {w!r}")
+    total = math.fsum(alloc[k] for k in BLEND_OF)
+    if abs(total - 1) > ALLOCATION_SUM_TOL:
+        raise OutputError(f"the four weights must add up to 1, got {total!r}")
+    if confidence is None:
+        raise OutputError("confidence is required for an allocation")
+    return Parsed(None, None, reasoning, float(confidence),
+                  MappingProxyType({k: float(alloc[k]) for k in BLEND_OF}))
+
+
+def parse_and_validate(text: str, universe: Sequence[str], asset_class: str = "us_equity",
+                       eligible: Sequence[str] | None = None) -> Parsed:
+    """Parse the reply and check it against the §8 format. Raises OutputError.
+
+    eligible (agent 7, v1.15): a non-zero weight outside it is invalid; exactly 0 is allowed (a sale).
+    """
+    obj = _load_object(text)
     action = obj.get("action")
     reasoning = obj.get("reasoning")
     if not isinstance(reasoning, str) or not reasoning.strip():
@@ -339,6 +434,7 @@ class AttemptRecord:
             "parsed_targets": None if p is None else _compact(None if p.targets is None else dict(p.targets)),
             "reasons": None if p is None or p.reasons is None else _compact(dict(p.reasons)),
             "overall_reasoning": None if p is None else p.reasoning,
+            "parsed_allocation": None if p is None or p.allocation is None else _compact(dict(p.allocation)),
             "confidence": None if p is None else p.confidence,
             "error": self.error,
         }
@@ -409,7 +505,13 @@ class AIAgent:
                 if resp.finish_reason == "length":
                     raise OutputError(f"reply cut off at the {self.model.max_tokens}-token output limit; "
                                       f"reply more briefly")
-                parsed = parse_and_validate(resp.text, universe, snapshot.asset_class, eligible)
+                if str(self.agent_id) == BLENDER_ID:
+                    parsed = parse_allocation(resp.text)
+                    if parsed.allocation is not None:      # the book from the weights it was shown
+                        parsed = replace(parsed, targets=MappingProxyType(
+                            blend(parsed.allocation, context.memory.strategies)))
+                else:
+                    parsed = parse_and_validate(resp.text, universe, snapshot.asset_class, eligible)
             except OutputError as e:
                 attempts.append(self._attempt(attempts, "invalid", prompt, resp, error=str(e)))
                 prompt = base if wrong_host else base + RETRY_NOTE.format(error=e)

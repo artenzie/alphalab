@@ -7,7 +7,7 @@
 Assembled exactly as agents/prompts/README.md says: each file read as UTF-8 and
 stripped of trailing whitespace, parts joined with a blank line. The harness
 adds the output spec and the input (agents/harness.build_prompt). Agent 13
-(the blender) is not wired in yet. Rule 3: frozen from Mon 11 Jan 2027.
+(the blender) has its own template and output spec (OUTPUT_SPEC_BLENDER). Rule 3: frozen from Mon 11 Jan 2027.
 """
 
 from __future__ import annotations
@@ -26,6 +26,7 @@ TEMPLATE_FILES: Mapping[str, tuple[str, ...]] = MappingProxyType({
     **{a: (_COMMON, "goal_autonomous.md") for a in ("8", "9", "10", "11", "12")},
     "14": (_COMMON, "goal_cautious.md"),
     "15": (_COMMON, "goal_aggressive.md"),
+    "13": ("agent_13_blender.md",),
     "C1": ("crypto_c1.md",),
 })
 
