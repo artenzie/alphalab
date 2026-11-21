@@ -68,13 +68,14 @@ from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Mapping
 
-from agents.harness import BACKOFF_S, ELIGIBLE_AGENTS
+from agents.harness import BACKOFF_S, BLEND_OF, BLENDER_ID, ELIGIBLE_AGENTS, blend
 from data import calendar as cal
 from data import db
 from data import snapshot as sn
 from execution import ledger as L
 from execution import ledger_db as LD
 from execution.risk import apply_eligibility, apply_risk, profile
+from runner import blender as BL
 from runner import experiment as ex
 from runner import roster
 from strategies.base import AgentMemory, Decision, PastDecision, Portfolio, build_context, ret63_top
@@ -269,20 +270,25 @@ def applied_weights(conn: sqlite3.Connection, decision: sqlite3.Row) -> dict[str
 
 
 def past_decisions(conn: sqlite3.Connection, agent_id: str, asset_class: str, before: date) -> tuple[PastDecision, ...]:
-    """The agent's own last decisions (final attempt per day) before `before`, oldest first (§4)."""
+    """The agent's own last decisions (final attempt per day) before `before`, oldest first (§4).
+
+    Agent 13 (v1.16): only its AI calls count (rows with a model id), not the days it just followed
+    agents 3-6 or held without a call, and each shows the allocation it set."""
+    ai_only = "AND q.model_id IS NOT NULL" if agent_id == BLENDER_ID else ""
     rows = conn.execute(
-        """SELECT d.*, s.snapshot_date FROM decisions AS d JOIN snapshots AS s ON s.snapshot_id = d.snapshot_id
+        f"""SELECT d.*, s.snapshot_date FROM decisions AS d JOIN snapshots AS s ON s.snapshot_id = d.snapshot_id
            WHERE d.agent_id = :a AND s.asset_class = :ac AND s.snapshot_date < :d AND d.corrects_id IS NULL
              AND d.attempt = (SELECT MAX(q.attempt) FROM decisions AS q WHERE q.agent_id = d.agent_id
-                              AND q.snapshot_id = d.snapshot_id AND q.corrects_id IS NULL)
+                              AND q.snapshot_id = d.snapshot_id AND q.corrects_id IS NULL {ai_only})
            ORDER BY s.snapshot_date DESC LIMIT :n""",
         {"a": agent_id, "ac": asset_class, "d": before.isoformat(), "n": LAST_DECISIONS}).fetchall()
     out = []
     for r in reversed(rows):
         targets = json.loads(r["parsed_targets"]) if r["status"] == "ok" and r["parsed_targets"] else None
+        alloc = json.loads(r["parsed_allocation"]) if r["status"] == "ok" and r["parsed_allocation"] else None
         out.append(PastDecision(date.fromisoformat(r["snapshot_date"]), r["status"], targets,
                                 json.loads(r["reasons"]) if r["reasons"] else {},
-                                r["overall_reasoning"] or r["error"] or ""))
+                                r["overall_reasoning"] or r["error"] or "", alloc))
     return tuple(out)
 
 
@@ -514,8 +520,9 @@ class _Day:
                 weights, _ = apply_eligibility(weights, inputs[aid][2], self.eligible, kind)
             self._queue_place(aid, row["decision_id"], weights, closes, deadline)
 
-        ai_todo = [a for a in todo if a in self.ai_ids]
-        pool = ThreadPoolExecutor(max_workers=max(1, len(ai_todo)), thread_name_prefix="ai")
+        ai_todo = [a for a in todo if a in self.ai_ids and a != BLENDER_ID]
+        blender = BLENDER_ID in todo                           # after agents 3-6 (§5 v1.16)
+        pool = ThreadPoolExecutor(max_workers=max(1, len(ai_todo) + blender), thread_name_prefix="ai")
         futures: dict[Future, str] = {}
         try:
             for aid in ai_todo:
@@ -540,6 +547,22 @@ class _Day:
                 except Exception as exc:  # noqa: BLE001 - a crash is invalid output: hold
                     dec, error = Decision.hold(f"held (invalid): {_err(exc)}"[:300]), _err(exc)
                 self._record(aid, sid, dec, error, current, etb, closes, deadline)
+            plan = None
+            if blender:
+                plan = self._blend_plan(sid, closes, ctx0, inputs)
+                if plan["ai"]:
+                    portfolio, ctx, _ = inputs[BLENDER_ID]
+                    ctx = replace(ctx, memory=replace(ctx.memory, strategies=plan["strategies"],
+                                                      allocation=plan["allocation"]))
+                    agent = roster.ai_agent(BLENDER_ID, self.deps.client_for(BLENDER_ID), self.deps.ai_sleep,
+                                            self.deps.ai_backoff)
+                    self.hb(f"decide:{BLENDER_ID}", "started", agent_id=BLENDER_ID, model=agent.model.model_id,
+                            allocation=plan["allocation"], traded=plan["traded"])
+                    futures[pool.submit(agent.decide, snap, portfolio, ctx)] = BLENDER_ID
+                else:
+                    self.hb(f"decide:{BLENDER_ID}", "started", agent_id=BLENDER_ID, ai_call=False,
+                            allocation=plan["allocation"], traded=plan["traded"])
+                    self._record_blender(sid, None, None, plan, inputs[BLENDER_ID][2], etb, closes, deadline)
             for fut in as_completed(futures):
                 aid = futures[fut]
                 try:
@@ -549,6 +572,9 @@ class _Day:
                         "\n" + traceback.format_exc()[-1500:]
                 if aid == roster.SHADOW_KEY:
                     self._record_shadow(sid, dec, error, inputs[roster.SHADOW_OF][2], etb, deadline)
+                    continue
+                if aid == BLENDER_ID:
+                    self._record_blender(sid, dec, error, plan, inputs[aid][2], etb, closes, deadline)
                     continue
                 self._record(aid, sid, dec, error, inputs[aid][2], etb, closes, deadline)
         finally:
@@ -627,6 +653,89 @@ class _Day:
         self.hb(f"decide:{aid}", "error" if failed else "finished", agent_id=aid, status=status, decision_id=did,
                 attempts=rep.attempts, cost_usd=rep.cost_usd, hold=dec.weights is None, risk_events=len(events),
                 **({"error": error[:500]} if error else {"reason": f"held ({status})"} if failed else {}))
+        self._queue_place(aid, did, weights, closes, deadline)
+
+    # -- agent 13, the blender (§5 v1.16) --
+
+    def _weights_after_decision(self, k: str, sid: int, closes: Mapping[str, float]) -> dict[str, float]:
+        """w_k: agent k's risk-checked targets if it rebalanced today, else its weights at the close."""
+        row = final_decision(self.conn, k, sid)
+        w = applied_weights(self.conn, row) if row is not None else None
+        if w is not None:
+            return {s: x for s, x in sorted(w.items()) if x}
+        acct = LD.load_account(self.conn, k, as_of=self.day)
+        pv = acct.value(closes)
+        return {s: p.qty * closes[s] / pv for s, p in sorted(acct.positions.items()) if pv and p.qty}
+
+    def _blend_plan(self, sid: int, closes: Mapping[str, float], ctx0, inputs) -> dict:
+        """Agent 13's day: the strategies it sees and blends, its allocation, whether it calls the AI."""
+        strategies, traded = {}, []
+        for k in BLEND_OF:
+            row = final_decision(self.conn, k, sid)
+            if row is not None and row["status"] == "ok" and json.loads(row["parsed_targets"]) is not None:
+                traded.append(k)                               # a non-hold decision today
+            strategies[k] = {"weights": self._weights_after_decision(k, sid, closes),
+                             **BL.strategy_stats(BL.marks_up_to(self.conn, k, self.day))}
+        allocation = BL.current_allocation(self.conn, self.day)
+        ai = ctx0.is_first_session_of_week or allocation is None
+        return {"strategies": strategies, "allocation": allocation, "traded": traded, "ai": ai}
+
+    def _record_blender(self, sid, dec, error, plan, current, etb, closes, deadline) -> None:
+        """Agent 13's rows: its AI call (if any), then a follow row when it didn't set an allocation
+        but agents 3-6 traded and it has one; or a hold row with no call. Risk events on the placed row."""
+        aid, rep = BLENDER_ID, self.report.agents[BLENDER_ID]
+        record = getattr(dec, "record", None)
+        decided_at = self.deps.now()
+        if decided_at > deadline:
+            rep.decision = "past deadline"
+            self.hb(f"decide:{aid}", "error", agent_id=aid, reason="decided after the deadline: not recorded, holds",
+                    deadline=db.utc_ts(deadline))
+            return
+        ts = db.utc_ts(decided_at)
+        alloc, traded = plan["allocation"], plan["traded"]
+        allocated = error is None and dec is not None and dec.weights is not None
+        follow = not allocated and alloc is not None and bool(traded)
+        rows: list[dict] = []
+        if record is not None:
+            rows += [a.row() for a in record.attempts]
+        elif plan["ai"]:                                       # the call crashed: invalid, like any agent
+            rows.append({"attempt": 1, "status": "invalid", "parsed_targets": None,
+                         "overall_reasoning": dec.reason if dec is not None else None, "error": error})
+        status = record.status if record is not None else "invalid" if plan["ai"] else "ok"
+        share = ", ".join(f"{k}: {alloc[k]:.2f}" for k in BLEND_OF) if alloc else ""
+        weights = None
+        if allocated:
+            weights = dict(dec.weights)
+        elif follow:
+            weights = blend(alloc, plan["strategies"])
+            why = ("no new allocation today" if plan["ai"] else "not a decision day")
+            rows.append({"attempt": len(rows) + 1, "status": "ok", "parsed_targets": json.dumps(weights, sort_keys=True),
+                         "parsed_allocation": json.dumps(alloc, sort_keys=True),
+                         "overall_reasoning": f"Follows agents {', '.join(traded)}, which traded today, at the "
+                                              f"unchanged allocation ({share}); {why}"})
+        elif not plan["ai"]:
+            rows.append({"attempt": 1, "status": "ok", "parsed_targets": "null",
+                         "parsed_allocation": None if alloc is None else json.dumps(alloc, sort_keys=True),
+                         "overall_reasoning": "Not a decision day and agents 3-6 did not trade: hold"})
+        events: list[dict] = []
+        if weights is not None:
+            weights, events = apply_risk(aid, Decision(weights, "blend"), etb, current)
+        with self.conn:
+            did = None
+            for r in rows:
+                did = _insert(self.conn, "decisions", {"agent_id": aid, "snapshot_id": sid, "decided_at": ts, **r})
+            LD.write_risk_events(self.conn, aid, events, decided_at, did)
+        rep.attempts = len(record.attempts) if record is not None else 0
+        rep.cost_usd = sum(a.cost_usd or 0.0 for a in record.attempts) if record is not None else None
+        rep.reason = dec.reason if allocated or (dec is not None and not follow) else rows[-1]["overall_reasoning"]
+        rep.asked = None if weights is None else dict(weights)
+        rep.decision = status + (" + follow" if follow else "") if plan["ai"] else ("follow" if follow else "hold")
+        rep.risk_events = len(events)
+        failed = error is not None or status in ("unavailable", "capped")
+        self.hb(f"decide:{aid}", "error" if failed else "finished", agent_id=aid, status=status, decision_id=did,
+                ai_call=plan["ai"], attempts=rep.attempts, cost_usd=rep.cost_usd, follow=follow,
+                allocation=dict(record.attempts[-1].parsed.allocation) if allocated else alloc,
+                hold=weights is None, risk_events=len(events), **({"error": error[:500]} if error else {}))
         self._queue_place(aid, did, weights, closes, deadline)
 
     def _record_shadow(self, sid, dec, error, current, etb, deadline) -> None:

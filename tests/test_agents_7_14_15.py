@@ -243,4 +243,4 @@ def test_agents_14_and_15_in_the_roster(aid, limits):
     p = harness.build_prompt(agent.template, aid, make_snapshot(HD), HOLDING, context())
     inp = json.loads(p.split("\nINPUT\n")[1])
     assert inp["limits"] == limits and "eligible" not in inp
-    assert roster.EQUITY_NOT_BUILT == ("13",)
+    assert roster.EQUITY_NOT_BUILT == ()

@@ -174,6 +174,7 @@ def reply(model, targets, text=None):
     return LLMResponse(body, model.model_id, model.provider_names[0], 1000, 200, 0.001, 50, 0, "stop")
 
 
+BLEND_ALLOC = {"3": 0.4, "4": 0.2, "5": 0.1, "6": 0.3}
 AI_TARGETS = {
     "8": {"AAPL": 0.15, "NVDA": 0.15, "XOM": -0.1},
     "9": {"JPM": 0.2, "LLY": 0.2},
@@ -199,6 +200,9 @@ class Client:
             self.barrier.wait(timeout=10)          # every AI agent must be in flight at once
         if self.fail:
             raise LLMUnavailable("timeout: read timed out after 300 s")
+        if self.agent_id == "13":                  # the blender: an allocation over agents 3-6 (v1.16)
+            return reply(model, {}, text=json.dumps({"action": "allocate", "allocation": BLEND_ALLOC,
+                                                     "reasoning": "synthetic blend", "confidence": 0.5}))
         if self.agent_id == "7":                   # only today's eligible stocks (v1.15)
             top = json.loads(prompt.split("\nINPUT\n", 1)[1])["eligible"]
             return reply(model, {s: 0.2 for s in top[:2]})
@@ -261,7 +265,7 @@ def test_equity_end_to_end_over_several_days(conn, clients, capsys):
     for r in reports:
         assert r.status == "ok" and r.exit_code == 0, (r.day, r.errors)
         assert r.checks_passed and not r.late
-    assert "agent 13 not built yet: skipped" in capsys.readouterr().out
+    assert "not built yet" not in capsys.readouterr().out
     for d in DAYS:
         rows = conn.execute("SELECT agent_id, equity FROM equity WHERE as_of_date = ?", (d.isoformat(),)).fetchall()
         assert sorted(r[0] for r in rows) == sorted(EQUITY_IDS)
