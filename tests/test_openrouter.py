@@ -16,7 +16,10 @@ import requests
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from agents.harness import AIAgent, PLACEHOLDER_TEMPLATE  # noqa: E402
+from agents.harness import AIAgent  # noqa: E402
+from agents.templates import load as load_template  # noqa: E402
+
+TEMPLATE = load_template(8)
 from agents.llm import LLMCapped, LLMUnavailable  # noqa: E402
 from agents.models import CLAUDE, GEMINI, GPT, GROK, ModelConfig  # noqa: E402
 from agents.openrouter import KEY_ENV, URL, OpenRouterClient, OpenRouterError  # noqa: E402
@@ -211,7 +214,7 @@ def test_other_errors_raise_with_status(status):
 
 def test_400_is_a_bug_not_retried_by_the_harness():
     client, session = client_with(FakeResponse(400, err(400, "bad parameter")))
-    agent = AIAgent(8, CLAUDE, PLACEHOLDER_TEMPLATE, client, sleep=lambda s: pytest.fail("slept"))
+    agent = AIAgent(8, CLAUDE, TEMPLATE, client, sleep=lambda s: pytest.fail("slept"))
     with pytest.raises(OpenRouterError):
         agent(make_snapshot(D), HOLDING, context())
     assert len(session.posts) == 1
@@ -276,7 +279,7 @@ def test_module_reads_key_only_via_getenv_and_never_prints():
 
 def test_through_aiagent_ok():
     client, _ = client_with(FakeResponse(200, ok_body(model="openai/gpt-6.1-sol-20261101", provider="OpenAI")))
-    dec = AIAgent(9, GPT, PLACEHOLDER_TEMPLATE, client)(make_snapshot(D), HOLDING, context())
+    dec = AIAgent(9, GPT, TEMPLATE, client)(make_snapshot(D), HOLDING, context())
     row = dec.record.attempts[0].row()
     assert dec.record.status == "ok" and dict(dec.weights) == {"AAPL": 0.2, "NVDA": -0.1}
     assert (row["model_id"], row["provider_served"], row["reasoning_setting"], row["temperature"]) == \
@@ -287,7 +290,7 @@ def test_through_aiagent_ok():
 def test_through_aiagent_wrong_model_twice_holds_invalid():
     bad = ok_body(model="anthropic/claude-haiku-5.5")
     client, session = client_with(FakeResponse(200, bad), FakeResponse(200, bad), clock=[0, 1, 2, 3])
-    dec = AIAgent(8, CLAUDE, PLACEHOLDER_TEMPLATE, client)(make_snapshot(D), HOLDING, context())
+    dec = AIAgent(8, CLAUDE, TEMPLATE, client)(make_snapshot(D), HOLDING, context())
     assert dec.is_hold and dec.record.status == "invalid" and len(session.posts) == 2
     assert all("wrong model" in a.error for a in dec.record.attempts)
 
@@ -295,5 +298,5 @@ def test_through_aiagent_wrong_model_twice_holds_invalid():
 def test_through_aiagent_429_retries_then_holds_unavailable():
     client, session = client_with(*[FakeResponse(429, err(429, "rate limited"))] * 4, clock=list(range(8)))
     sleeps = []
-    dec = AIAgent(8, CLAUDE, PLACEHOLDER_TEMPLATE, client, sleep=sleeps.append)(make_snapshot(D), HOLDING, context())
+    dec = AIAgent(8, CLAUDE, TEMPLATE, client, sleep=sleeps.append)(make_snapshot(D), HOLDING, context())
     assert dec.record.status == "unavailable" and sleeps == [300, 600, 900] and len(session.posts) == 4

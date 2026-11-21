@@ -1,6 +1,6 @@
 """The AI agent harness: one interface every model plugs into (protocol §4, §5, §8, v1.10).
 
-    agent = AIAgent(agent_id=8, model=model_for(8), template=PLACEHOLDER_TEMPLATE, client=client)
+    agent = AIAgent(agent_id=8, model=model_for(8), template=templates.load(8), client=client)
     decision = agent(snapshot, portfolio, context)      # same call as agents 1-6
     for attempt in decision.record.attempts:             # one decisions row per call
         row = attempt.row()
@@ -12,7 +12,7 @@ and one AttemptRecord per call with every AI column of the decisions table.
 The runner adds agent_id, snapshot_id and decided_at and writes the rows; the
 harness never touches the database, files, network or environment itself.
 
-The prompt is: the agent's fixed template + OUTPUT_SPEC + the input as compact
+The prompt is: the agent's fixed template (agents/templates.py) + OUTPUT_SPEC + the input as compact
 JSON (date, snapshot fields, own portfolio, own limits, own last 5 decisions).
 The AI inputs a Portfolio doesn't carry (average cost, starting value, past
 decisions) come in on context.memory, set by the runner.
@@ -69,12 +69,6 @@ BACKOFF_S = (300, 600, 900)      # 3 retries over 30 minutes (§8)
 LAST_DECISIONS = 5               # §4
 REASON_CHARS = 300               # Decision.reason is a one-line summary; full text is in the record
 
-PLACEHOLDER_TEMPLATE = (
-    "PLACEHOLDER PROMPT (the real prompts are written on Sat 5 Dec 2026 and stored in agents/prompts/).\n"
-    "You manage a US equity portfolio. Each trading day after the close you see a snapshot of\n"
-    "market data and your own portfolio, and you decide your target portfolio for tomorrow's open."
-)
-
 OUTPUT_SPEC = """\
 OUTPUT FORMAT
 Reply with one JSON object and nothing else (a ```json fenced block is also accepted). Either:
@@ -88,14 +82,6 @@ Rules:
 - Give a one-line reason for every symbol in targets.
 - confidence is a number from 0 to 1.
 - Your limits are in the input; positions beyond them are cut back pro rata."""
-
-CRYPTO_PLACEHOLDER_TEMPLATE = (
-    "PLACEHOLDER PROMPT (the real prompts are written on Sat 5 Dec 2026 and stored in agents/prompts/).\n"
-    "You manage a crypto portfolio of five coins against USD (BTC, ETH, SOL, XRP, DOGE), long only.\n"
-    "Each day after the 00:00 UTC daily bar closes you see a snapshot of market data and your own\n"
-    "portfolio, and you decide your target portfolio. Orders fill at the next available price, with\n"
-    "a 0.25% fee per trade. Aim for the highest return you can within your limits."
-)
 
 OUTPUT_SPEC_CRYPTO = """\
 OUTPUT FORMAT

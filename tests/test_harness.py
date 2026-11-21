@@ -17,15 +17,17 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from agents import harness  # noqa: E402
-from agents.harness import (AIAgent, AIDecision, OutputError, PLACEHOLDER_TEMPLATE,  # noqa: E402
+from agents.harness import (AIAgent, AIDecision, OutputError,  # noqa: E402
                             build_prompt, parse_and_validate, sha256)
 from agents.llm import FakeClient, LLMCapped, LLMResponse, LLMUnavailable, model_matches  # noqa: E402
 from agents.models import CLAUDE, GEMINI  # noqa: E402
+from agents.templates import load as load_template  # noqa: E402
 from data import db  # noqa: E402
 from strategies.base import AgentMemory, Decision, PastDecision, Portfolio  # noqa: E402
 from test_strategies import EMPTY, RUN, STOCKS, ctx, make_snapshot, sealed  # noqa: E402
 
 D = RUN[5]
+TEMPLATE = load_template(8)
 MODEL, PROVIDER = CLAUDE.model_id, "Anthropic"
 MEMORY = AgentMemory(
     starting_value=100_000.0, avg_cost={"AAPL": 210.0},
@@ -50,7 +52,7 @@ def resp(text, provider=PROVIDER, model=MODEL, finish="stop"):
 
 def run(script, portfolio=HOLDING, d=D, agent_id=8, config=CLAUDE):
     client, sleeps = FakeClient(script), []
-    agent = AIAgent(agent_id, config, PLACEHOLDER_TEMPLATE, client, sleep=sleeps.append)
+    agent = AIAgent(agent_id, config, TEMPLATE, client, sleep=sleeps.append)
     return agent(make_snapshot(d), portfolio, context(d)), client, sleeps
 
 
@@ -299,7 +301,7 @@ def test_prompt_hash_stable():
 def test_prompt_contents():
     _, client, _ = run([resp(HOLD)])
     prompt = client.prompts[0]
-    assert prompt.startswith(PLACEHOLDER_TEMPLATE) and harness.OUTPUT_SPEC in prompt
+    assert prompt.startswith(TEMPLATE) and harness.OUTPUT_SPEC in prompt
     assert "COMPLETE target portfolio" in prompt and "leave out of targets is sold" in prompt
     assert "SPY is market context only" in prompt
     head, body = prompt.split("\nINPUT\n", 1)
@@ -379,6 +381,8 @@ AGENT_FILES = sorted((ROOT / "agents").glob("*.py"))
 ALLOWED = {"__future__", "hashlib", "json", "math", "re", "time", "dataclasses", "types", "typing",
            "strategies.base", "execution.risk", "agents.llm", "agents.models", "data.snapshot"}
 NETWORK_FILES = {"openrouter.py"}        # the one module that talks to the outside (tests/test_openrouter.py)
+# agents/templates.py reads the fixed prompt files in agents/prompts/ (and nothing else) when the roster is built
+EXTRA_ALLOWED = {"templates.py": {"pathlib", "sys"}}
 
 
 @pytest.mark.parametrize("path", [p for p in AGENT_FILES if p.name not in NETWORK_FILES], ids=lambda p: p.stem)
@@ -390,7 +394,8 @@ def test_agent_files_import_only_allowed_modules(path):
             imported |= {a.name for a in node.names}
         elif isinstance(node, ast.ImportFrom):
             imported.add(node.module)
-    assert imported <= ALLOWED, imported - ALLOWED
+    allowed = ALLOWED | EXTRA_ALLOWED.get(path.name, set())
+    assert imported <= allowed, imported - allowed
     names = {n.id for n in ast.walk(tree) if isinstance(n, ast.Name)}
     assert not names & {"open", "eval", "exec", "__import__", "globals", "compile"}
 

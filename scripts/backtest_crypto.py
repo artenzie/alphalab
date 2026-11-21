@@ -46,7 +46,8 @@ from dotenv import load_dotenv
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
-from agents.harness import CRYPTO_PLACEHOLDER_TEMPLATE, AIAgent  # noqa: E402
+from agents.harness import AIAgent  # noqa: E402
+from agents.templates import load as load_template  # noqa: E402
 from agents.models import model_for  # noqa: E402
 from data import calendar as cal  # noqa: E402
 from data import db  # noqa: E402
@@ -80,7 +81,7 @@ def insert(conn, table: str, row: dict) -> int:
 
 
 def make_agents(client):
-    c1 = AIAgent("C1", model_for("C1"), CRYPTO_PLACEHOLDER_TEMPLATE, client, sleep=lambda s: None, backoff=())
+    c1 = AIAgent("C1", model_for("C1"), load_template("C1"), client, sleep=lambda s: None, backoff=())
     return {"C0": registry.get_agent("C0"), "C1": c1}
 
 

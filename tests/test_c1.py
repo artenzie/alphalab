@@ -15,7 +15,10 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from agents import harness  # noqa: E402
-from agents.harness import CRYPTO_PLACEHOLDER_TEMPLATE, AIAgent, build_prompt  # noqa: E402
+from agents.harness import AIAgent, build_prompt  # noqa: E402
+from agents.templates import load as load_template  # noqa: E402
+
+CRYPTO_TEMPLATE = load_template("C1")
 from agents.llm import FakeClient, LLMResponse  # noqa: E402
 from agents.models import CLAUDE, model_for  # noqa: E402
 from data.snapshot import Bar, Snapshot, canonical_json, compute_fields, sha256  # noqa: E402
@@ -59,7 +62,7 @@ def rebalance(targets):
 
 def c1(script):
     client = FakeClient([resp(t) for t in script])
-    return AIAgent("C1", model_for("C1"), CRYPTO_PLACEHOLDER_TEMPLATE, client, sleep=lambda s: None), client
+    return AIAgent("C1", model_for("C1"), CRYPTO_TEMPLATE, client, sleep=lambda s: None), client
 
 
 def test_c1_uses_agent_8s_claude_config():
@@ -67,8 +70,8 @@ def test_c1_uses_agent_8s_claude_config():
 
 
 def test_crypto_prompt_has_the_coins_the_crypto_spec_and_c1_limits():
-    p = build_prompt(CRYPTO_PLACEHOLDER_TEMPLATE, "C1", crypto_snapshot(), EMPTY, ctx())
-    assert p.startswith(CRYPTO_PLACEHOLDER_TEMPLATE) and harness.OUTPUT_SPEC_CRYPTO in p
+    p = build_prompt(CRYPTO_TEMPLATE, "C1", crypto_snapshot(), EMPTY, ctx())
+    assert p.startswith(CRYPTO_TEMPLATE) and harness.OUTPUT_SPEC_CRYPTO in p
     assert harness.OUTPUT_SPEC not in p and "22 stocks" not in p and "SPY" not in p
     inp = json.loads(p.split("\nINPUT\n", 1)[1])
     assert sorted(inp["snapshot"]) == list(COINS)
@@ -79,9 +82,9 @@ def test_crypto_prompt_has_the_coins_the_crypto_spec_and_c1_limits():
 
 def test_asset_classes_cannot_be_mixed():
     with pytest.raises(ValueError, match="crypto snapshots"):
-        build_prompt(CRYPTO_PLACEHOLDER_TEMPLATE, "C1", make_snapshot(D), EMPTY, ctx())
+        build_prompt(CRYPTO_TEMPLATE, "C1", make_snapshot(D), EMPTY, ctx())
     with pytest.raises(ValueError, match="us_equity snapshots"):
-        build_prompt(harness.PLACEHOLDER_TEMPLATE, 8, crypto_snapshot(), EMPTY, ctx())
+        build_prompt(load_template(8), 8, crypto_snapshot(), EMPTY, ctx())
 
 
 def test_valid_hold_and_rebalance():

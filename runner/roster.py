@@ -1,8 +1,8 @@
 """Which agents the daily runner runs (protocol §5, §13), and how each is built.
 
 The one place that maps an agent id to its decide function or AI config. The
-real prompts (Sat 5 Dec, agents/prompts/) replace the placeholder templates in
-TEMPLATES; rule 3 freezes this file from Mon 11 Jan 2027.
+AI prompt templates come from agents/prompts/ (agents/templates.py); rule 3
+freezes this file from Mon 11 Jan 2027.
 """
 
 from __future__ import annotations
@@ -11,7 +11,8 @@ from dataclasses import replace
 from datetime import date
 from typing import Callable, Sequence
 
-from agents.harness import (BACKOFF_S, CRYPTO_PLACEHOLDER_TEMPLATE, PLACEHOLDER_TEMPLATE, AIAgent)
+from agents import templates
+from agents.harness import BACKOFF_S, AIAgent
 from agents.llm import LLMClient
 from agents.models import model_for
 from strategies import registry
@@ -24,11 +25,7 @@ CRYPTO_RULE = ("C0",)
 CRYPTO_AI = ("C1",)
 CRYPTO_NOT_BUILT: tuple[str, ...] = ()
 
-TEMPLATES = {
-    "8": PLACEHOLDER_TEMPLATE, "9": PLACEHOLDER_TEMPLATE, "10": PLACEHOLDER_TEMPLATE,
-    "11": PLACEHOLDER_TEMPLATE, "12": PLACEHOLDER_TEMPLATE,
-    "C1": CRYPTO_PLACEHOLDER_TEMPLATE,
-}
+TEMPLATES = {a: templates.load(a) for a in templates.TEMPLATE_FILES}   # agents/prompts/ (§8)
 
 
 def rule_ids(asset_class: str) -> tuple[str, ...]:

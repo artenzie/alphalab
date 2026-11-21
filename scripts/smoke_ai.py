@@ -20,7 +20,8 @@ from dotenv import load_dotenv
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
-from agents.harness import PLACEHOLDER_TEMPLATE, AIAgent  # noqa: E402
+from agents.harness import AIAgent  # noqa: E402
+from agents.templates import load as load_template  # noqa: E402
 from agents.models import model_for  # noqa: E402
 from agents.openrouter import OpenRouterClient  # noqa: E402
 from data import db  # noqa: E402
@@ -62,7 +63,7 @@ def main() -> int:
     total = 0.0
     for agent_id in AGENTS:
         model = model_for(agent_id)
-        agent = AIAgent(agent_id, model, PLACEHOLDER_TEMPLATE, client, sleep=lambda s: None, backoff=())
+        agent = AIAgent(agent_id, model, load_template(agent_id), client, sleep=lambda s: None, backoff=())
         dec = agent(snap, portfolio, ctx)
         rec = dec.record
         print(f"== agent {agent_id} · {model.name} · {model.model_id} "
