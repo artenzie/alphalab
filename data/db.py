@@ -48,6 +48,7 @@ COLUMN_UPGRADES = (
     ("decisions", "reasoning_tokens",
      "INTEGER CHECK (reasoning_tokens IS NULL OR (reasoning_tokens >= 0 AND "
      "(tokens_out IS NULL OR reasoning_tokens <= tokens_out)))"),
+    ("experiment", "end_date", "TEXT CHECK (end_date IS NULL OR end_date GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]')"),      # v1.15
 )
 
 

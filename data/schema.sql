@@ -403,13 +403,14 @@ CREATE INDEX IF NOT EXISTS ix_shadow_decisions ON shadow_decisions (shadow_of, s
 -- experiment: the label of this database file (protocol §9, v1.13)
 -- ---------------------------------------------------------------------------
 -- One database file per experiment (shakedown, official, or a dev copy). The
--- single row names it and its first decision day; the daily runner refuses a
+-- single row names it, its first and last decision days (end_date, v1.15); the daily runner refuses a
 -- file without it, or a date before start_date. Written by runner/experiment.py.
 CREATE TABLE IF NOT EXISTS experiment (
     experiment_id  INTEGER PRIMARY KEY,
     name           TEXT NOT NULL CHECK (name GLOB '[a-z]*' AND name NOT GLOB '*[^a-z0-9_-]*'),
     start_date     TEXT NOT NULL CHECK (start_date GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]'),
     source         TEXT,                            -- where the market data was copied from
+    end_date       TEXT CHECK (end_date IS NULL OR end_date GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]'),  -- last decision day (v1.15)
     created_at     TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
                    CHECK (created_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9]Z')
 );

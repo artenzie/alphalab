@@ -13,7 +13,8 @@ The runner adds agent_id, snapshot_id and decided_at and writes the rows; the
 harness never touches the database, files, network or environment itself.
 
 The prompt is: the agent's fixed template (agents/templates.py) + OUTPUT_SPEC + the input as compact
-JSON (date, snapshot fields, own portfolio, own limits, own last 5 decisions).
+JSON (date, snapshot fields, own portfolio, own limits, own last 5 decisions, and
+run: the end date and trading days left, v1.15).
 The AI inputs a Portfolio doesn't carry (average cost, starting value, past
 decisions) come in on context.memory, set by the runner.
 
@@ -140,6 +141,10 @@ def prompt_input(agent_id: int | str, snapshot: "Snapshot", portfolio: Portfolio
     memory = context.memory
     if memory is None:
         raise ValueError("an AI agent needs context.memory (set by the runner)")
+    if memory.end_date is None or memory.trading_days_left is None:
+        raise ValueError("an AI agent needs the run's end date and trading days left (context.memory, v1.15)")
+    if memory.end_date < context.decision_date or memory.trading_days_left < 0:
+        raise ValueError(f"decision date {context.decision_date} is after the run's end date {memory.end_date}")
     past = sorted(memory.last_decisions, key=lambda d: d.decision_date)
     if past and past[-1].decision_date >= context.decision_date:
         raise ValueError("last_decisions must be before the decision date")
@@ -170,6 +175,7 @@ def prompt_input(agent_id: int | str, snapshot: "Snapshot", portfolio: Portfolio
         "limits": {("max_per_coin" if crypto else "max_per_stock"): lim.max_per_stock, "shorts_allowed": lim.shorts,
                    "max_gross": lim.max_gross, "max_total_short": lim.max_total_short},
         "last_decisions": [_past(d) for d in past[-LAST_DECISIONS:]],
+        "run": {"end_date": memory.end_date.isoformat(), "trading_days_left": int(memory.trading_days_left)},
     }
 
 

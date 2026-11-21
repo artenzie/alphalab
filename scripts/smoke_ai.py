@@ -58,7 +58,8 @@ def main() -> int:
           f"{len(snap.payload['symbols'])} symbols, sha {snap.sha256[:12]})\n")
 
     portfolio = Portfolio(cash=START, positions={}, value=START)
-    ctx = replace(Context(DAY, False, False, False), memory=AgentMemory(starting_value=START))
+    ctx = replace(Context(DAY, False, False, False), memory=AgentMemory(starting_value=START, end_date=DAY,
+                                                                      trading_days_left=0))
     client = OpenRouterClient()
     total = 0.0
     for agent_id in AGENTS:

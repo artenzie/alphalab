@@ -99,10 +99,17 @@ class PastDecision:
 
 @dataclass(frozen=True)
 class AgentMemory:
-    """The §4 AI inputs a Portfolio doesn't carry, read from the log by the runner."""
+    """The §4 AI inputs a Portfolio doesn't carry, read from the log and the label by the runner.
+
+    end_date is the run's last decision day (the experiment label, v1.15) and
+    trading_days_left the run's trading days after the decision date: NYSE
+    sessions for equity, calendar days for crypto, 0 on the last day.
+    """
     starting_value: float
     avg_cost: Mapping[str, float] = field(default_factory=dict)
     last_decisions: tuple[PastDecision, ...] = ()
+    end_date: date | None = None
+    trading_days_left: int | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "avg_cost", MappingProxyType(dict(self.avg_cost)))

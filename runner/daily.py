@@ -200,6 +200,18 @@ def run_sessions(conn: sqlite3.Connection, asset_class: str, start: date, day: d
     return [d for d in days if cal.session(d, conn, trading) is not None]
 
 
+def trading_days_left(conn: sqlite3.Connection, asset_class: str, day: date, end: date | None, trading: Any) -> int:
+    """The run's trading days after `day` up to `end` (v1.15): NYSE sessions, or calendar days for crypto."""
+    if end is None:
+        raise ex.ExperimentError("the experiment label has no end date (made before v1.15); "
+                                 "AI agents need it for input.run")
+    if day > end:
+        raise ex.ExperimentError(f"{day} is after the experiment's end date {end}")
+    if day == end:
+        return 0
+    return len(run_sessions(conn, asset_class, day + timedelta(days=1), end, trading))
+
+
 # ---------------------------------------------------------------------------
 # What is already stored (restart safety)
 # ---------------------------------------------------------------------------
@@ -486,9 +498,10 @@ class _Day:
             except Exception as exc:  # noqa: BLE001 - no flags: new shorts are rejected and logged
                 self.hb("fetch_etb", "error", error=_err(exc), effect="no flags: new shorts rejected")
 
-        inputs = {aid: self._inputs(aid, closes, ctx0) for aid in todo + stored}
+        run = self._run_info(exp)
+        inputs = {aid: self._inputs(aid, closes, ctx0, run) for aid in todo + stored}
         if shadow and roster.SHADOW_OF not in inputs:
-            inputs[roster.SHADOW_OF] = self._inputs(roster.SHADOW_OF, closes, ctx0)
+            inputs[roster.SHADOW_OF] = self._inputs(roster.SHADOW_OF, closes, ctx0, run)
 
         self.deferred: list[tuple[str, int, Any]] = []      # crypto: placed together at t_ref
         for aid in stored:                                     # decided in an earlier run, not placed yet
@@ -540,7 +553,20 @@ class _Day:
         self.report.decided = True
         self.hb("decide", "finished", decisions={a: self.report.agents[a].decision for a in todo + stored})
 
-    def _inputs(self, aid: str, closes: Mapping[str, float], ctx0):
+    def _run_info(self, exp: ex.Experiment) -> tuple[date | None, int | None]:
+        """input.run (v1.15): the label's end date and the run's trading days after today.
+
+        (None, None) if the label has no end date or today is after it: the AI agents then fail
+        their prompt and hold as invalid; a heartbeat says why. Rule agents are unaffected."""
+        try:
+            left = trading_days_left(self.conn, self.ac, self.day, exp.end_date, self.deps.trading)
+        except Exception as exc:  # noqa: BLE001
+            self.hb("run_info", "error", error=_err(exc), effect="AI agents hold (invalid)")
+            return None, None
+        self.hb("run_info", "finished", end_date=exp.end_date.isoformat(), trading_days_left=left)
+        return exp.end_date, left
+
+    def _inputs(self, aid: str, closes: Mapping[str, float], ctx0, run=(None, None)):
         acct = LD.load_account(self.conn, aid, as_of=self.day)
         pv = acct.value(closes)
         portfolio = Portfolio(cash=acct.cash, positions={s: p.qty for s, p in acct.positions.items()}, value=pv)
@@ -549,7 +575,8 @@ class _Day:
         if aid in self.ai_ids:
             ctx = replace(ctx0, memory=AgentMemory(
                 starting_value=L.START_CASH, avg_cost={s: p.avg_cost for s, p in acct.positions.items()},
-                last_decisions=past_decisions(self.conn, aid, self.ac, self.day)))
+                last_decisions=past_decisions(self.conn, aid, self.ac, self.day),
+                end_date=run[0], trading_days_left=run[1]))
         return portfolio, ctx, current
 
     def _record(self, aid, sid, dec, error, current, etb, closes, deadline) -> None:

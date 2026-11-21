@@ -111,7 +111,8 @@ def run(db_path: Path, days: list[date], client) -> dict:
                     if aid == "C1":
                         ctx = replace(ctx, memory=AgentMemory(
                             starting_value=L.START_CASH, avg_cost={s: p.avg_cost for s, p in acct.positions.items()},
-                            last_decisions=tuple(past[-5:])))
+                            last_decisions=tuple(past[-5:]), end_date=days[-1],
+                            trading_days_left=len(days) - i - 1))
                     dec = agent(snap, portfolio, ctx)
                     current = {s: p.qty * closes[s] / pv for s, p in acct.positions.items()}
                     weights, events = apply_risk(aid, dec, {}, current)

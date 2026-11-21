@@ -32,7 +32,8 @@ MODEL, PROVIDER = CLAUDE.model_id, "Anthropic"
 MEMORY = AgentMemory(
     starting_value=100_000.0, avg_cost={"AAPL": 210.0},
     last_decisions=tuple(PastDecision(RUN[i], "ok", {"AAPL": 0.1}, {"AAPL": "trend"}, f"day {i}")
-                         for i in range(5)) + (PastDecision(RUN[4], "invalid", None, {}, "held"),))
+                         for i in range(5)) + (PastDecision(RUN[4], "invalid", None, {}, "held"),),
+    end_date=date(2027, 4, 2), trading_days_left=12)
 HOLDING = Portfolio(cash=50_000.0, positions={"AAPL": 100.0, "NVDA": -10.0}, value=100_000.0)
 
 HOLD = '{"action": "hold", "reasoning": "Nothing has changed."}'
@@ -307,7 +308,8 @@ def test_prompt_contents():
     head, body = prompt.split("\nINPUT\n", 1)
     assert "\n" not in body and ": " not in body       # compact JSON, one line
     inp = json.loads(body)
-    assert set(inp) == {"date", "snapshot", "portfolio", "limits", "last_decisions"}
+    assert set(inp) == {"date", "snapshot", "portfolio", "limits", "last_decisions", "run"}
+    assert inp["run"] == {"end_date": "2027-04-02", "trading_days_left": 12}
     assert inp["date"] == D.isoformat()
     assert inp["snapshot"] == make_snapshot(D).payload["symbols"]
     assert all(f["last_date"] <= D.isoformat() for f in inp["snapshot"].values())
@@ -334,7 +336,12 @@ def test_prompt_guards():
         build_prompt("t", 8, snap, HOLDING, context(d=RUN[6]))
     with pytest.raises(ValueError, match="memory"):
         build_prompt("t", 8, snap, HOLDING, ctx(D))
-    future = AgentMemory(100_000.0, {}, (PastDecision(D, "ok", None),))
+    for bad, msg in ((replace(MEMORY, end_date=None), "end date and trading days left"),
+                     (replace(MEMORY, trading_days_left=None), "end date and trading days left"),
+                     (replace(MEMORY, end_date=RUN[4]), "after the run's end date")):
+        with pytest.raises(ValueError, match=msg):
+            build_prompt("t", 8, snap, HOLDING, context(memory=bad))
+    future = AgentMemory(100_000.0, {}, (PastDecision(D, "ok", None),), date(2027, 4, 2), 12)
     with pytest.raises(ValueError, match="before the decision date"):
         build_prompt("t", 8, snap, HOLDING, context(memory=future))
 

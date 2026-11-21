@@ -47,7 +47,8 @@ def crypto_snapshot(d=D, n=120):
 
 
 def ctx(d=D):
-    return replace(Context(d, False, False, False), memory=AgentMemory(starting_value=100_000.0))
+    return replace(Context(d, False, False, False), memory=AgentMemory(starting_value=100_000.0,
+                                                                         end_date=d, trading_days_left=0))
 
 
 def resp(text):

@@ -33,6 +33,7 @@ UTC = timezone.utc
 UNIVERSE = load_universe()
 STOCKS = [s for s in UNIVERSE if s != "SPY"]
 START = date(2026, 11, 16)                       # Mon
+END = date(2026, 11, 24)                         # the dev label's last decision day (v1.15)
 DAYS = [date(2026, 11, d) for d in (16, 17, 18, 19, 20, 23)]   # across a weekend
 EQUITY_IDS = roster.EQUITY_RULE + roster.EQUITY_AI
 LEDGER_TABLES = ("snapshots", "decisions", "risk_events", "orders", "fills", "positions", "equity")
@@ -215,7 +216,8 @@ def conn(tmp_path):
     seed_calendar(c)
     seed_history(c)
     with c:
-        c.execute("INSERT INTO experiment (name, start_date) VALUES ('dev', ?)", (START.isoformat(),))
+        c.execute("INSERT INTO experiment (name, start_date, end_date) VALUES ('dev', ?, ?)",
+                  (START.isoformat(), END.isoformat()))
     yield c
     c.close()
 
@@ -284,6 +286,9 @@ def test_equity_end_to_end_over_several_days(conn, clients, capsys):
     assert clip and all(e["applied_weight"] == pytest.approx(0.2) for e in clip)
     # AI memory: day 2's prompt shows day 1's decision
     assert '"last_decisions":[{"action":"rebalance","date":"2026-11-16"' in clients["9"].calls[1]
+    # input.run (v1.15): the label's end date, NYSE sessions left (Tue 17 .. Tue 24 Nov = 6 on day 1)
+    for i, d in enumerate(DAYS):
+        assert f'"run":{{"end_date":"2026-11-24","trading_days_left":{6 - i}}}' in clients["8"].calls[i], d
     # heartbeat: one run_id per run, every step started and finished
     for r in reports:
         rows = heartbeat(conn, r.run_id)
@@ -712,3 +717,19 @@ def test_no_shadow_call_outside_the_shakedown(conn, clients):
     assert not roster.shadow_active("shakedown", "crypto", date(2026, 12, 20))
     assert roster.shadow_active("shakedown", "us_equity", date(2026, 12, 14))
     assert not roster.shadow_active("shakedown", "us_equity", date(2027, 1, 11))
+
+
+def test_label_without_end_date_holds_ai_agents(tmp_path, clients):
+    c = db.init_db(tmp_path / "old.db")
+    seed_calendar(c)
+    seed_history(c)
+    with c:
+        c.execute("INSERT INTO experiment (name, start_date) VALUES ('dev', ?)", (START.isoformat(),))
+    r, _ = equity_run(c, START, clients)
+    assert r.exit_code == 1 and any(e.startswith("run_info:") and "no end date" in e for e in r.errors)
+    assert n_calls(clients) == 0                                   # no prompt is built without input.run
+    for aid in roster.EQUITY_AI:
+        assert r.agents[aid].decision == "invalid", aid
+    for aid in roster.EQUITY_RULE:
+        assert r.agents[aid].decision == "ok", aid
+    c.close()

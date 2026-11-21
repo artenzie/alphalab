@@ -1,11 +1,11 @@
 """Experiment databases (protocol §9, v1.13): one SQLite file per experiment.
 
-    python -m runner.experiment create shakedown --start 2026-12-14 --from data/alphalab.db
-    python -m runner.experiment create official --start 2027-01-11 --from data/shakedown.db
+    python -m runner.experiment create shakedown --start 2026-12-14 --end 2027-01-08 --from data/alphalab.db
+    python -m runner.experiment create official --start 2027-01-11 --end 2027-04-02 --from data/shakedown.db
     python -m runner.experiment show --experiment official
 
 A new experiment file gets the schema, its label (the single `experiment`
-row: name, start date, source) and a copy of the market data from an existing
+row: name, start date, end date, source) and a copy of the market data from an existing
 database: prices, the calendar cache and the crypto fill bars (and fetched windows), with their ids
 and fetched_at unchanged, so point-in-time reads give the same answers. It
 gets no ledger rows, so every agent starts at START_CASH ($100,000) on the
@@ -32,6 +32,11 @@ OFFICIAL = "official"
 SHAKEDOWN = "shakedown"
 OFFICIAL_START = date(2027, 1, 11)          # D3
 SHAKEDOWN_START = date(2026, 12, 14)
+# Last decision days (§1, v1.15), for equity and crypto alike. Performance is measured to
+# that day's close; the last decision is logged but fills after the run.
+OFFICIAL_END = date(2027, 4, 2)
+SHAKEDOWN_END = date(2027, 1, 8)
+FIXED = {OFFICIAL: (OFFICIAL_START, OFFICIAL_END), SHAKEDOWN: (SHAKEDOWN_START, SHAKEDOWN_END)}
 MARKET_TABLES = ("calendar_fetches", "market_sessions", "prices", "crypto_fill_bars", "crypto_fill_windows")   # FK order
 
 
@@ -44,6 +49,7 @@ class Experiment:
     name: str
     start_date: date
     source: str | None = None
+    end_date: date | None = None             # None only on labels made before v1.15
 
 
 def path_for(name: str) -> Path:
@@ -52,10 +58,14 @@ def path_for(name: str) -> Path:
 
 
 def get(conn: sqlite3.Connection) -> Experiment | None:
-    row = conn.execute("SELECT name, start_date, source FROM experiment ORDER BY experiment_id LIMIT 1").fetchone()
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(experiment)")}
+    end = "end_date" if "end_date" in cols else "NULL AS end_date"
+    row = conn.execute(f"SELECT name, start_date, source, {end} FROM experiment "
+                       "ORDER BY experiment_id LIMIT 1").fetchone()
     if row is None:
         return None
-    return Experiment(row["name"], date.fromisoformat(row["start_date"]), row["source"])
+    return Experiment(row["name"], date.fromisoformat(row["start_date"]), row["source"],
+                      None if row["end_date"] is None else date.fromisoformat(row["end_date"]))
 
 
 def require(conn: sqlite3.Connection, day: date | None = None) -> Experiment:
@@ -71,10 +81,20 @@ def require(conn: sqlite3.Connection, day: date | None = None) -> Experiment:
     return exp
 
 
-def create(name: str, start: date, source: Path, out: Path) -> Experiment:
-    """A new labelled experiment database at `out` with the market data of `source`."""
+def create(name: str, start: date, source: Path, out: Path, end: date | None = None) -> Experiment:
+    """A new labelled experiment database at `out` with the market data of `source`.
+
+    end is the last decision day (v1.15); official and shakedown must use their fixed dates.
+    """
     if name == OFFICIAL and start != OFFICIAL_START:
         raise ExperimentError(f"the official experiment starts on {OFFICIAL_START} (D3), not {start}")
+    if end is None:
+        raise ExperimentError("an experiment needs an end date (its last decision day, v1.15)")
+    if name in FIXED and (start, end) != FIXED[name]:
+        s, e = FIXED[name]
+        raise ExperimentError(f"the {name} experiment runs {s} to {e} (§1), not {start} to {end}")
+    if end < start:
+        raise ExperimentError(f"end date {end} is before the start date {start}")
     if out.exists():
         raise ExperimentError(f"{out} already exists; an experiment database is never overwritten")
     if not source.exists():
@@ -98,8 +118,8 @@ def create(name: str, start: date, source: Path, out: Path) -> Experiment:
                 rows = src.execute(f"SELECT {names} FROM {table} ORDER BY rowid").fetchall()
                 conn.executemany(f"INSERT INTO {table} ({names}) VALUES ({', '.join('?' * len(cols))})",
                                  [tuple(r) for r in rows])
-            conn.execute("INSERT INTO experiment (name, start_date, source) VALUES (?, ?, ?)",
-                         (name, start.isoformat(), source.name))
+            conn.execute("INSERT INTO experiment (name, start_date, end_date, source) VALUES (?, ?, ?, ?)",
+                         (name, start.isoformat(), end.isoformat(), source.name))
         return require(conn)
     except BaseException:
         conn.close()
@@ -121,6 +141,8 @@ def main(argv: list[str] | None = None) -> int:
     c = sub.add_parser("create", help="new labelled database with a copy of the market data")
     c.add_argument("name")
     c.add_argument("--start", type=date.fromisoformat, required=True, metavar="YYYY-MM-DD")
+    c.add_argument("--end", type=date.fromisoformat, required=True, metavar="YYYY-MM-DD",
+                   help="last decision day (v1.15)")
     c.add_argument("--from", dest="source", type=Path, default=db.DEFAULT_DB_PATH, help="source database")
     c.add_argument("--db", type=Path, default=None, help="output path (default data/<name>.db)")
     s = sub.add_parser("show", help="print the label and row counts")
@@ -131,8 +153,9 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if args.cmd == "create":
             out = args.db or path_for(args.name)
-            exp = create(args.name, args.start, args.source, out)
-            print(f"created {out}: experiment {exp.name!r}, start {exp.start_date}, market data from {exp.source}")
+            exp = create(args.name, args.start, args.source, out, args.end)
+            print(f"created {out}: experiment {exp.name!r}, {exp.start_date} to {exp.end_date}, "
+                  f"market data from {exp.source}")
             conn = db.connect(out)
         else:
             path = args.db or path_for(args.experiment)
@@ -140,7 +163,8 @@ def main(argv: list[str] | None = None) -> int:
                 raise ExperimentError(f"{path} not found")
             conn = db.connect(path)
             exp = require(conn)
-            print(f"{path}: experiment {exp.name!r}, start {exp.start_date}, market data from {exp.source}")
+            print(f"{path}: experiment {exp.name!r}, {exp.start_date} to {exp.end_date}, "
+                  f"market data from {exp.source}")
         try:
             for t, n in counts(conn).items():
                 print(f"  {t:<18} {n:>8}")
