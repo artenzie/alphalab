@@ -1,0 +1,21 @@
+# AlphaLab tick: runs whatever is due for the active experiment (runner/tick.py).
+# Started every 5 minutes by alphalab-tick.timer; that timer is the retry, so there is
+# no Restart= here. Exit code 1 (a run ended in error) shows as a failed unit in the journal.
+[Unit]
+Description=AlphaLab tick (runner.tick)
+After=network-online.target time-sync.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=artem
+Group=artem
+WorkingDirectory=/home/artem/alphalab
+ExecStart=/home/artem/alphalab/venv/bin/python -m runner.tick
+# An on-time equity run waits up to 30 min for the decide time; an AI outage adds up to 30 min.
+TimeoutStartSec=3h
+Environment=PYTHONUNBUFFERED=1
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=alphalab-tick
+Nice=5

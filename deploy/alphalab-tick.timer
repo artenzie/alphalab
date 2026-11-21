@@ -1,0 +1,13 @@
+# Every 5 minutes. Persistent=true: after a power cut or reboot, a missed tick runs at boot.
+# While a tick is still running, systemd skips the next elapse (and runner.tick has its own lock).
+[Unit]
+Description=AlphaLab tick every 5 minutes
+
+[Timer]
+OnCalendar=*:0/5
+Persistent=true
+AccuracySec=10s
+Unit=alphalab-tick.service
+
+[Install]
+WantedBy=timers.target
