@@ -28,6 +28,11 @@ the agent's last targets (it holds them); before its first targets it has none a
 pairs are left out that day. The report gives the daily mean, min and max over pairs and
 each pair's mean over the days.
 
+Which agents (v1.16): the headline figure is over agents 8-12 only (10 pairs: one prompt,
+five models). A supplementary figure covers every agent that makes its own AI call for
+stock targets: 7-12, 14 and 15 (28 pairs). Agent 13 is in neither: its book is a blend of
+the rule-based agents 3-6, not targets it chose.
+
 Reasoning (§8 rule, v1.14): per AI agent, the final call of each decision: median
 reasoning tokens and the share of calls with any reasoning.
 
@@ -128,9 +133,13 @@ def overlap(a: Mapping[str, float], b: Mapping[str, float]) -> float:
     return tot
 
 
-def ai_targets_by_day(conn: sqlite3.Connection) -> dict[str, dict[str, dict[str, float]]]:
+HERDING_HEADLINE = ("8", "9", "10", "11", "12")                        # §10 v1.16: same prompt, 5 models
+HERDING_SUPPLEMENTARY = ("7", "8", "9", "10", "11", "12", "14", "15")  # every AI-call stock picker; not 13
+
+
+def ai_targets_by_day(conn: sqlite3.Connection, agents=HERDING_SUPPLEMENTARY) -> dict[str, dict[str, dict[str, float]]]:
     """snapshot_date -> AI agent -> its target weights after risk (holds carry the last targets)."""
-    ai = [a for a in AGENT_MODELS if not a.startswith("C")]
+    ai = [a for a in agents if a in AGENT_MODELS and not a.startswith("C")]
     snaps = conn.execute("""SELECT snapshot_id, snapshot_date FROM snapshots
                             WHERE asset_class = 'us_equity' AND corrects_id IS NULL ORDER BY snapshot_date""").fetchall()
     last: dict[str, dict[str, float]] = {}
@@ -152,18 +161,23 @@ def ai_targets_by_day(conn: sqlite3.Connection) -> dict[str, dict[str, dict[str,
     return out
 
 
-def overlap_by_day(conn: sqlite3.Connection) -> dict[str, dict[tuple[str, str], float]]:
-    """snapshot_date -> (agent a, agent b) -> overlap, for every pair that both have targets."""
+def overlap_by_day(conn: sqlite3.Connection, agents=HERDING_HEADLINE) -> dict[str, dict[tuple[str, str], float]]:
+    """snapshot_date -> (agent a, agent b) -> overlap, for every pair of `agents` that both have targets."""
     out = {}
-    for day, targets in ai_targets_by_day(conn).items():
+    for day, targets in ai_targets_by_day(conn, agents).items():
         ids = sorted(targets, key=_order)
         out[day] = {(a, b): overlap(targets[a], targets[b]) for a, b in combinations(ids, 2)}
     return out
 
 
 def overlap_report(conn: sqlite3.Connection) -> list[str]:
-    days = {d: p for d, p in overlap_by_day(conn).items() if p}
-    lines = ["", "AI target overlap (same-direction sum of min weights; 0 = none, 1 = same book)"]
+    return (_overlap_lines(conn, HERDING_HEADLINE, "headline: agents 8-12, one prompt")
+            + _overlap_lines(conn, HERDING_SUPPLEMENTARY, "supplementary: agents 7-12, 14, 15; 13 excluded"))
+
+
+def _overlap_lines(conn: sqlite3.Connection, agents, label: str) -> list[str]:
+    days = {d: p for d, p in overlap_by_day(conn, agents).items() if p}
+    lines = ["", f"AI target overlap, {label} (same-direction sum of min weights; 0 = none, 1 = same book)"]
     if not days:
         return lines + ["  no AI decisions yet"]
     lines.append(f"  {'day':<10} {'pairs':>5} {'mean':>6} {'min':>6} {'max':>6}  most similar")
@@ -185,13 +199,16 @@ GATE_THRESHOLD = 0.6
 
 
 def reasoning_summary(conn: sqlite3.Connection) -> dict[str, tuple[int, float, float]]:
-    """AI agent -> (calls, median reasoning tokens, share of calls with any), final attempts only."""
+    """AI agent -> (calls, median reasoning tokens, share of calls with any), final attempts only.
+
+    Only rows with a model id count, so agent 13's follow and hold rows (no call) are left out."""
     out: dict[str, list[int]] = {}
     for r in conn.execute(
             """SELECT d.agent_id, d.reasoning_tokens FROM decisions AS d
                WHERE d.model_id IS NOT NULL AND d.corrects_id IS NULL AND d.reasoning_tokens IS NOT NULL
                  AND d.decision_id = (SELECT q.decision_id FROM decisions AS q WHERE q.agent_id = d.agent_id
-                                      AND q.snapshot_id = d.snapshot_id ORDER BY q.attempt DESC,
+                                      AND q.snapshot_id = d.snapshot_id AND q.model_id IS NOT NULL
+                                      ORDER BY q.attempt DESC,
                                       q.decision_id DESC LIMIT 1)"""):
         out.setdefault(r["agent_id"], []).append(r["reasoning_tokens"])
     return {a: (len(v), median(v), sum(1 for x in v if x > 0) / len(v)) for a, v in out.items()}

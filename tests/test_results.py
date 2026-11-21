@@ -67,9 +67,8 @@ def test_daily_overlap_uses_risk_checked_targets_and_carries_holds(conn, clients
     equity_run(conn, DAYS[1], down)
     by_day = results.overlap_by_day(conn)
     d0, d1 = DAYS[0].isoformat(), DAYS[1].isoformat()
-    n = len(test_runner.roster.EQUITY_AI)
-    pairs = n * (n - 1) // 2                                                # every pair of built AI agents
-    assert len(by_day[d0]) == pairs
+    pairs = 10                                                              # headline: agents 8-12 only
+    assert len(by_day[d0]) == pairs and {a for p in by_day[d0] for a in p} == set(results.HERDING_HEADLINE)
     assert by_day[d0][("8", "9")] == pytest.approx(0.30)
     assert by_day[d0][("11", "12")] == pytest.approx(0.20)                  # both AMZN at the 20% cap
     assert by_day[d1][("8", "9")] == pytest.approx(0.30)                    # 9's day-1 targets carried
@@ -100,3 +99,26 @@ def test_reasoning_summary_and_gate(conn, clients, monkeypatch):
     assert rs["8"] == (3, 0, 0.0)                                          # the fake replies report 0
     text = results.report(conn)
     assert "effort medium" in text and "with reasoning   0%" in text
+
+
+def test_supplementary_overlap_covers_ai_call_agents_and_never_13(conn, clients):
+    equity_run(conn, DAYS[0], clients)
+    assert conn.execute("SELECT COUNT(*) FROM decisions WHERE agent_id = '13' AND parsed_targets <> 'null'"
+                        ).fetchone()[0] == 1                               # 13 has a book that day ...
+    sup = results.overlap_by_day(conn, results.HERDING_SUPPLEMENTARY)[DAYS[0].isoformat()]
+    agents = {a for p in sup for a in p}
+    assert agents == {"7", "8", "9", "10", "11", "12", "14", "15"} and len(sup) == 28
+    assert "13" not in agents                                              # ... but is in neither figure
+    head = results.overlap_by_day(conn)[DAYS[0].isoformat()]
+    assert set(head) <= set(sup) and len(head) == 10
+    assert all(head[k] == sup[k] for k in head)
+    text = results.report(conn)
+    assert "headline: agents 8-12" in text and "supplementary: agents 7-12, 14, 15; 13 excluded" in text
+    assert f"{DAYS[0].isoformat()}    28" in text and f"{DAYS[0].isoformat()}    10" in text
+
+
+def test_reasoning_summary_ignores_rows_without_a_call(conn, clients):
+    for d in DAYS[:3]:
+        equity_run(conn, d, clients)
+    calls, _, _ = results.reasoning_summary(conn)["13"]
+    assert calls == 1                                                      # day 1 only; follow/hold rows left out
