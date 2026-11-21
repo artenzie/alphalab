@@ -448,8 +448,8 @@ def ping(url: str | None = None, session: Any = requests) -> bool:
 class Pinger:
     """Ping now and then every PING_EVERY seconds until stopped, so a 3-hour tick still looks alive."""
 
-    def __init__(self, every: float = PING_EVERY, ping_fn: Callable[[], Any] = ping):
-        self.every, self.ping_fn = every, ping_fn
+    def __init__(self, every: float = PING_EVERY, ping_fn: Callable[[], Any] | None = None):
+        self.every, self.ping_fn = every, ping_fn or (lambda: ping())
         self._stop = threading.Event()
         self._thread = threading.Thread(target=self._loop, daemon=True)
 

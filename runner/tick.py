@@ -22,6 +22,9 @@ A lock (data/tick.lock) keeps two ticks apart; each run also takes runner.daily'
 lock, so a manual `runner.daily` run is never overlapped. Each tick writes one heartbeat row
 (job 'tick') to the experiment's database, so gaps between ticks measure uptime (D2).
 Exit code 1 if any run ended in error or the tick failed; the next timer tick is the retry.
+
+main() also pings HEALTHCHECKS_URL (at the start and every 4 min while it runs) and, after the
+runs, queues and sends phone alerts (runner/alerts.py); neither can change the exit code.
 """
 
 from __future__ import annotations
@@ -262,6 +265,17 @@ def _tick(data_dir, now, make_deps, trading) -> TickResult:
     return res
 
 
+def after_tick_alerts(data_dir: Path, t0: datetime, now: Callable[[], datetime], **kw) -> None:
+    """Phone alerts after the runs (runner/alerts.py). Never raises: alerts never fail a tick."""
+    try:
+        from runner import alerts
+        sent, left = alerts.after_tick(data_dir, t0, now, **kw)
+        if sent or left:
+            print(f"alerts: sent {sent}, left {left}")
+    except Exception as e:  # noqa: BLE001
+        print(f"alerts: failed ({type(e).__name__}: {e}); retried next tick", file=sys.stderr)
+
+
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(description="Run whatever is due now for the active experiment.")
     sub = p.add_subparsers(dest="cmd")
@@ -279,7 +293,15 @@ def main(argv: list[str] | None = None) -> int:
             (data_dir / ACTIVE_NAME).write_text("", encoding="utf-8")
             print(f"emptied {data_dir / ACTIVE_NAME}")
             return 0
-        res = run_tick(data_dir, lambda: datetime.now(timezone.utc), daily.real_deps)
+        from runner import alerts
+        alerts.load_env()
+        clock = lambda: datetime.now(timezone.utc)  # noqa: E731
+        t0 = clock()
+        with alerts.Pinger():                    # healthchecks.io: alive, also during a 3-hour tick
+            try:
+                res = run_tick(data_dir, clock, daily.real_deps)
+            finally:
+                after_tick_alerts(data_dir, t0, clock)
     except (TickError, ex.ExperimentError) as e:
         print(f"ERROR: {e}", file=sys.stderr)
         return 1

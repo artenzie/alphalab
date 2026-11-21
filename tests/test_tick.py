@@ -294,3 +294,24 @@ def test_daily_cli_no_ai_refused_on_shakedown(tmp_path, monkeypatch):
 def test_gitignore_covers_the_active_file_and_lock():
     lines = (ROOT / ".gitignore").read_text().split()
     assert "data/active_experiment" in lines and "data/tick.lock" in lines
+
+
+def test_alerts_never_fail_the_tick(world, monkeypatch, capsys):
+    from runner import alerts
+
+    def boom(*a, **k):
+        raise RuntimeError("ntfy down and the DB locked")
+    monkeypatch.setattr(alerts, "after_tick", boom)
+    tick.after_tick_alerts(world.data_dir, datetime(2026, 11, 16, tzinfo=UTC), lambda: datetime(2026, 11, 16, tzinfo=UTC))
+    assert "alerts: failed (RuntimeError" in capsys.readouterr().err
+
+
+def test_main_pings_and_alerts_and_keeps_the_exit_code(tmp_path, monkeypatch):
+    from runner import alerts
+    calls = []
+    monkeypatch.setattr(tick.db, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(alerts, "load_env", lambda: None)
+    monkeypatch.setattr(alerts, "ping", lambda *a, **k: calls.append("ping"))
+    monkeypatch.setattr(alerts, "after_tick", lambda *a, **k: (calls.append("alerts"), 1 / 0))
+    assert tick.main([]) == 0                                     # nothing active: idle, exit 0
+    assert calls[0] == "ping" and "alerts" in calls
