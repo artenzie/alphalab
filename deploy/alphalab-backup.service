@@ -1,0 +1,19 @@
+# AlphaLab nightly backup to Google Drive (deploy/backup.sh). Started by alphalab-backup.timer.
+[Unit]
+Description=AlphaLab nightly backup (rclone to gdrive:alphalab-backups)
+After=network-online.target time-sync.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=artem
+Group=artem
+WorkingDirectory=/home/artem/alphalab
+ExecStart=/home/artem/alphalab/deploy/backup.sh
+TimeoutStartSec=2h
+Environment=PYTHONUNBUFFERED=1
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=alphalab-backup
+Nice=10
+IOSchedulingClass=idle

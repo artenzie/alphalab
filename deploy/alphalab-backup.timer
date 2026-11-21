@@ -1,0 +1,13 @@
+# Every night at 02:30 UTC: after the crypto run and its fill hour, long before the equity run.
+# Persistent=true: a night missed while the Pi was off runs at boot.
+[Unit]
+Description=AlphaLab nightly backup at 02:30 UTC
+
+[Timer]
+OnCalendar=*-*-* 02:30:00 UTC
+Persistent=true
+AccuracySec=1min
+Unit=alphalab-backup.service
+
+[Install]
+WantedBy=timers.target
