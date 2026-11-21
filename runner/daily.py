@@ -81,6 +81,7 @@ from runner import roster
 from strategies.base import AgentMemory, Decision, PastDecision, Portfolio, build_context, ret63_top
 
 JOB = "daily_run"
+NO_AI_LABEL = "dev"                 # --no-ai runs only on a dev experiment, never shakedown or official
 ASSET_CLASSES = {"equity": "us_equity", "crypto": "crypto"}
 LAST_DECISIONS = 5
 WAIT_STEP_S = 60.0
@@ -336,13 +337,13 @@ class RunReport:
 class _Day:
     """State of one run of one asset class and day."""
 
-    def __init__(self, conn, asset_class, day, deps, run_id):
+    def __init__(self, conn, asset_class, day, deps, run_id, ai: bool = True):
         self.conn, self.ac, self.day, self.deps = conn, asset_class, day, deps
         self.crypto = asset_class == "crypto"
         self.hb = Heartbeat(conn, run_id, deps.now)
         self.report = RunReport(run_id, asset_class, day)
         self.rule_ids = roster.rule_ids(asset_class)
-        self.ai_ids = roster.ai_ids(asset_class)
+        self.ai_ids = roster.ai_ids(asset_class) if ai else ()
         self.ids = self.rule_ids + self.ai_ids
         for aid in self.rule_ids:
             self.report.agents[aid] = AgentReport(aid, "rule")
@@ -847,8 +848,11 @@ def _order(aid: str) -> tuple:
 
 
 def run_day(conn: sqlite3.Connection, asset_class: str, day: date | None = None, deps: Deps | None = None,
-            run_id: str | None = None) -> RunReport:
-    """Run (or resume) one day. Never raises for a step's failure: it is logged and reported."""
+            run_id: str | None = None, ai: bool = True) -> RunReport:
+    """Run (or resume) one day. Never raises for a step's failure: it is logged and reported.
+
+    ai=False (--no-ai, dev labels only): the rule-based agents (1-6, C0) only. The AI agents are
+    skipped like unbuilt ones (no rows, no client created), so the run costs nothing."""
     deps = deps or Deps()
     if asset_class not in ASSET_CLASSES.values():
         raise ValueError(f"unknown asset class {asset_class!r}")
@@ -860,14 +864,21 @@ def run_day(conn: sqlite3.Connection, asset_class: str, day: date | None = None,
     except Exception as exc:
         hb(JOB, "error", asset_class=asset_class, date=None if day is None else day.isoformat(), error=_err(exc))
         raise
-    d = _Day(conn, asset_class, day, deps, run_id)
+    if not ai and exp.name != NO_AI_LABEL:
+        hb(JOB, "error", asset_class=asset_class, date=day.isoformat(),
+           error=f"--no-ai is only allowed on a {NO_AI_LABEL!r} label, not {exp.name!r}")
+        raise ex.ExperimentError(f"--no-ai is only allowed on a {NO_AI_LABEL!r} label, not {exp.name!r}")
+    d = _Day(conn, asset_class, day, deps, run_id, ai)
     hb = d.hb
     rep = d.report
-    rep.skipped = roster.not_built(asset_class)
+    rep.skipped = roster.not_built(asset_class) + (() if ai else roster.ai_ids(asset_class))
     hb(JOB, "started", asset_class=asset_class, date=day.isoformat(), experiment=exp.name,
-       skipped_not_built=list(rep.skipped))
-    for aid in rep.skipped:
+       skipped_not_built=list(roster.not_built(asset_class)), ai=ai,
+       **({} if ai else {"skipped_no_ai": list(roster.ai_ids(asset_class))}))
+    for aid in roster.not_built(asset_class):
         print(f"agent {aid} not built yet: skipped")
+    if not ai:
+        print(f"--no-ai: AI agents {', '.join(roster.ai_ids(asset_class))} skipped")
     try:
         if asset_class == "us_equity":
             if cal.session(day, conn, deps.trading) is None:
@@ -926,7 +937,7 @@ def format_report(r: RunReport) -> str:
              + (f"  LATE by {r.minutes_late} min" if r.late else "")
              + f"  snapshot {r.snapshot_id} checks_passed={r.checks_passed}"]
     if r.skipped:
-        lines.append("not built yet, skipped: " + ", ".join(r.skipped))
+        lines.append("skipped (not built, or --no-ai): " + ", ".join(r.skipped))
     for aid in sorted(r.agents, key=_order):
         a = r.agents[aid]
         cost = "" if a.cost_usd is None else f"  ${a.cost_usd:.4f}"
