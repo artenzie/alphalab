@@ -67,12 +67,14 @@ def test_daily_overlap_uses_risk_checked_targets_and_carries_holds(conn, clients
     equity_run(conn, DAYS[1], down)
     by_day = results.overlap_by_day(conn)
     d0, d1 = DAYS[0].isoformat(), DAYS[1].isoformat()
-    assert len(by_day[d0]) == 10
+    n = len(test_runner.roster.EQUITY_AI)
+    pairs = n * (n - 1) // 2                                                # every pair of built AI agents
+    assert len(by_day[d0]) == pairs
     assert by_day[d0][("8", "9")] == pytest.approx(0.30)
     assert by_day[d0][("11", "12")] == pytest.approx(0.20)                  # both AMZN at the 20% cap
     assert by_day[d1][("8", "9")] == pytest.approx(0.30)                    # 9's day-1 targets carried
     text = results.report(conn)
-    assert "AI target overlap" in text and f"{d0}    10" in text
+    assert "AI target overlap" in text and f"{d0}    {pairs}" in text
 
 
 def test_reasoning_summary_and_gate(conn, clients, monkeypatch):
