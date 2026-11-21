@@ -10,7 +10,7 @@ AlphaLab is a research project that runs AI trading agents against Alpaca **pape
 
 | Path | Purpose |
 |---|---|
-| `research/experiment_protocol.md` | The protocol (currently **v1.15**); § numbers in code refer to it |
+| `research/experiment_protocol.md` | The protocol (currently **v1.16**); § numbers in code refer to it |
 | `research/decisions.md`, `research/logs/` | Design decisions (D1, D2, …) and dated learning logs |
 | `research/universe/` | Frozen universe (`universe.csv`) + holdings evidence |
 | `data/db.py` | SQLite schema setup (`schema.sql`) and connections; append-only triggers |
@@ -27,14 +27,14 @@ AlphaLab is a research project that runs AI trading agents against Alpaca **pape
 | `execution/ledger_db.py` | Ledger on the append-only tables: `settle_day` (fill at open, or crypto at the first 1-min bar after the decision; accrue, mark), `place_orders` |
 | `scripts/` | One-off tools: build_universe, OpenRouter model checks (`test_pinned`, `smoke_ai`), backtest_indicators/risk/ledger. Never collected by pytest (`pytest.ini`) |
 | `tests/` | pytest suite |
-| `agents/harness.py` | `AIAgent`: same `decide` interface; prompt (template + output spec + JSON input incl. `run`, and `eligible` for agent 7), JSON validation, §8 retries, call record per attempt; crypto spec for C1 |
+| `agents/harness.py` | `AIAgent`: same `decide` interface; prompt (template + output spec + JSON input incl. `run`, `eligible` for agent 7, `strategies`/`allocation` for agent 13), JSON validation (agent 13: `parse_allocation`, book = `blend`), §8 retries, call record per attempt; crypto spec for C1 |
 | `agents/prompts/`, `agents/templates.py` | The real prompt templates (README there: how they're assembled) and their loader; `python -m agents.templates` prints each agent's template SHA-256 |
 | `agents/llm.py` | `LLMClient` interface, `FakeClient` for tests |
 | `agents/models.py` | Frozen §8 model lineup as data (agent → model, endpoints, reasoning, temperature) |
 | `agents/openrouter.py` | `OpenRouterClient`: pinned endpoints, no fallbacks, error mapping, key never logged |
 | `runner/daily.py` | `python -m runner.daily equity\|crypto --experiment NAME [--date D]`: one trading day in protocol order (ingest → settle → snapshot → decide → risk → orders), restart-safe, heartbeat per step, late runs (v1.13) |
-| `runner/experiment.py`, `runner/roster.py` | One DB file per experiment (`data/<name>.db`, labelled with start and end date; `create --start --end` copies market data, empty ledger); which agents run (all but 13) and how they're built |
-| `analysis/results.py` | Results report per agent from an experiment DB: returns, late and missed days, `--exclude-late` (§10) |
+| `runner/experiment.py`, `runner/roster.py` | One DB file per experiment (`data/<name>.db`, labelled with start and end date; `create --start --end` copies market data, empty ledger); which agents run (all of them) and how they're built; `runner/blender.py`: agent 13's strategy inputs from marks up to the decision date |
+| `analysis/results.py` | Results report per agent from an experiment DB: returns, late and missed days, `--exclude-late`, herding (headline 8-12, supplementary 7-12/14/15, never 13) (§10) |
 | `dashboard/` | Not built yet |
 
 ## Working here
