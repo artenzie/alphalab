@@ -418,6 +418,34 @@ CREATE TABLE IF NOT EXISTS experiment (
 );
 
 -- ---------------------------------------------------------------------------
+-- alerts: the phone-alert queue (runner/alerts.py, ntfy.sh)
+-- ---------------------------------------------------------------------------
+-- One row per problem opened or resolved, or per one-off notice (daily summary,
+-- spend, backup). A key is open while its last open/resolved row is 'open', so a
+-- problem alerts once and a recovery once. A row with no alert_sends row is
+-- still to be sent: a failed send is retried on the next tick. Never traded on,
+-- never in any agent's input.
+CREATE TABLE IF NOT EXISTS alerts (
+    alert_id     INTEGER PRIMARY KEY,
+    key          TEXT NOT NULL,                     -- 'error:crypto:2026-12-14', 'summary:us_equity:2026-12-14', ...
+    event        TEXT NOT NULL CHECK (event IN ('open', 'resolved', 'notice')),
+    title        TEXT NOT NULL,
+    body         TEXT NOT NULL,
+    priority     INTEGER NOT NULL CHECK (priority BETWEEN 1 AND 5),   -- ntfy priority
+    created_at   TEXT NOT NULL CHECK (created_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9]Z'),
+    corrects_id  INTEGER REFERENCES alerts(alert_id)
+);
+CREATE INDEX IF NOT EXISTS ix_alerts_key ON alerts (key, alert_id);
+
+-- alert_sends: one row when ntfy accepted an alert.
+CREATE TABLE IF NOT EXISTS alert_sends (
+    send_id      INTEGER PRIMARY KEY,
+    alert_id     INTEGER NOT NULL REFERENCES alerts(alert_id),
+    sent_at      TEXT NOT NULL CHECK (sent_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9]Z')
+);
+CREATE UNIQUE INDEX IF NOT EXISTS ux_alert_sends ON alert_sends (alert_id);
+
+-- ---------------------------------------------------------------------------
 -- Integrity triggers
 -- ---------------------------------------------------------------------------
 
@@ -479,3 +507,7 @@ CREATE TRIGGER IF NOT EXISTS shadow_decisions_no_update BEFORE UPDATE ON shadow_
 CREATE TRIGGER IF NOT EXISTS shadow_decisions_no_delete BEFORE DELETE ON shadow_decisions BEGIN SELECT RAISE(ABORT, 'shadow_decisions is append-only (CLAUDE.md rule 2)'); END;
 CREATE TRIGGER IF NOT EXISTS experiment_no_update       BEFORE UPDATE ON experiment       BEGIN SELECT RAISE(ABORT, 'experiment is append-only (CLAUDE.md rule 2)'); END;
 CREATE TRIGGER IF NOT EXISTS experiment_no_delete       BEFORE DELETE ON experiment       BEGIN SELECT RAISE(ABORT, 'experiment is append-only (CLAUDE.md rule 2)'); END;
+CREATE TRIGGER IF NOT EXISTS alerts_no_update      BEFORE UPDATE ON alerts      BEGIN SELECT RAISE(ABORT, 'alerts is append-only (CLAUDE.md rule 2)'); END;
+CREATE TRIGGER IF NOT EXISTS alerts_no_delete      BEFORE DELETE ON alerts      BEGIN SELECT RAISE(ABORT, 'alerts is append-only (CLAUDE.md rule 2)'); END;
+CREATE TRIGGER IF NOT EXISTS alert_sends_no_update BEFORE UPDATE ON alert_sends BEGIN SELECT RAISE(ABORT, 'alert_sends is append-only (CLAUDE.md rule 2)'); END;
+CREATE TRIGGER IF NOT EXISTS alert_sends_no_delete BEFORE DELETE ON alert_sends BEGIN SELECT RAISE(ABORT, 'alert_sends is append-only (CLAUDE.md rule 2)'); END;

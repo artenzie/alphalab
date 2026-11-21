@@ -107,6 +107,9 @@ def populated(conn):
                     VALUES ('8', ?, '2026-12-14T23:00:30.000Z', 'ok', 'anthropic/claude-sonnet-5.5', 'high',
                             '{"WMT": 0.3}', '{"WMT": 0.2}')""", (snap,))
     conn.execute("INSERT INTO experiment (name, start_date) VALUES ('shakedown', '2026-12-14')")
+    aid = conn.execute("INSERT INTO alerts (key, event, title, body, priority, created_at) "
+                       "VALUES ('tick', 'open', 't', 'b', 4, '2026-12-14T23:00:00.000Z')").lastrowid
+    conn.execute("INSERT INTO alert_sends (alert_id, sent_at) VALUES (?, '2026-12-14T23:00:01.000Z')", (aid,))
     conn.commit()
     return conn
 
