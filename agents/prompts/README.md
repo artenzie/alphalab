@@ -24,7 +24,7 @@ No template contains a date or an experiment name, so the shakedown and the offi
 1. **Goal for agents 7, 8–12 and 13:** "the best return you can for the risk you take, over the whole run". This matches the paper's main metric (Sharpe) and places 8–12 between Cautious (14: volatility below SPY's) and Aggressive (15: highest return).
 2. **Horizon:** the agents are told the run's end date and the trading days left (`input.run`).
 3. **Framing:** honest. "An AI agent taking part in a research experiment", simulated paper money, no real money at stake. There is no role-play persona.
-4. **Agent 7's rule:** a target outside `input.eligible` makes the whole reply invalid (one retry with the error shown, then hold), the same as a target on SPY. A held stock that has left the list is sold at the next open even on a hold, and the sale is logged.
+4. **Agent 7's rule:** a non-zero target outside `input.eligible` makes the whole reply invalid (one retry with the error shown, then hold), the same as a target on SPY. A weight of exactly 0 is allowed: it is how a model sells a stock that left the list (Artem, Sat 21 Nov, at plan review). A held stock that has left the list is sold at the next open even on a hold, and the sale is logged.
 
 These were decided without discussion, because they follow from the protocol or keep the comparison fair:
 - Every prompt states the real costs and limits (§6, §7), and gives the same data dictionary for the snapshot fields (§4).

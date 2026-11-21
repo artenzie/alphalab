@@ -68,16 +68,16 @@ from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Mapping
 
-from agents.harness import BACKOFF_S
+from agents.harness import BACKOFF_S, ELIGIBLE_AGENTS
 from data import calendar as cal
 from data import db
 from data import snapshot as sn
 from execution import ledger as L
 from execution import ledger_db as LD
-from execution.risk import apply_risk, profile
+from execution.risk import apply_eligibility, apply_risk, profile
 from runner import experiment as ex
 from runner import roster
-from strategies.base import AgentMemory, Decision, PastDecision, Portfolio, build_context
+from strategies.base import AgentMemory, Decision, PastDecision, Portfolio, build_context, ret63_top
 
 JOB = "daily_run"
 ASSET_CLASSES = {"equity": "us_equity", "crypto": "crypto"}
@@ -469,6 +469,7 @@ class _Day:
                deadline: datetime, window: tuple[datetime, datetime]) -> None:
         """Steps 5-8."""
         closes = {s: f["last_close"] for s, f in snap.payload["symbols"].items() if f["last_close"] is not None}
+        self.eligible = [] if self.crypto else ret63_top(snap)   # agent 7's list (v1.15), as in its prompt
         ctx0 = build_context(self.day, run_sessions(self.conn, self.ac, exp.start_date, self.day, self.deps.trading))
         todo, stored = [], []
         for aid in self.ids:
@@ -507,7 +508,11 @@ class _Day:
         for aid in stored:                                     # decided in an earlier run, not placed yet
             row = final_decision(self.conn, aid, sid)
             self.report.agents[aid].decision = f"stored ({row['status']})"
-            self._queue_place(aid, row["decision_id"], applied_weights(self.conn, row), closes, deadline)
+            weights = applied_weights(self.conn, row)
+            if aid in ELIGIBLE_AGENTS:       # the same sale as when it was recorded; its events are stored
+                kind = row["status"] if row["status"] != "ok" else "hold" if weights is None else "rebalance"
+                weights, _ = apply_eligibility(weights, inputs[aid][2], self.eligible, kind)
+            self._queue_place(aid, row["decision_id"], weights, closes, deadline)
 
         ai_todo = [a for a in todo if a in self.ai_ids]
         pool = ThreadPoolExecutor(max_workers=max(1, len(ai_todo)), thread_name_prefix="ai")
@@ -592,6 +597,11 @@ class _Day:
                     deadline=db.utc_ts(deadline))
             return
         weights, events = (None, []) if error else apply_risk(aid, dec, etb, current)
+        if aid in ELIGIBLE_AGENTS:           # §5 v1.15: a held stock off the list is sold on any day
+            status = "invalid" if error else record.status if record is not None else "ok"
+            kind = status if status != "ok" else "hold" if weights is None else "rebalance"
+            weights, sold = apply_eligibility(weights, current, self.eligible, kind)
+            events = events + sold
         ts = db.utc_ts(decided_at)
         with self.conn:
             if record is not None:

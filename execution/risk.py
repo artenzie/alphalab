@@ -24,6 +24,13 @@ Every step only sets a weight to zero, cuts it, or multiplies it by a factor in
 no sign is flipped. A hold decision (weights None) passes through untouched:
 drift is only checked on decision days. margin_check runs every day.
 
+apply_eligibility (agent 7, §5 v1.15) runs after apply_risk, on every day:
+a held stock that is not in today's eligible list is sold (weight 0), on a
+hold, a rebalance or an invalid day alike, one 'forced_reduction' event with
+rule 'eligibility' per stock. Kept positions keep their current weight, so
+they get no trade. Like the margin cut, it is a forced sale the agent didn't
+ask for (§6).
+
 Each clip or rejection is one event per symbol, as a dict whose keys are the
 risk_events columns (event_type, rule, symbol, requested_weight,
 applied_weight, detail); detail is a JSON string. The runner adds agent_id,
@@ -174,6 +181,41 @@ def apply_risk(agent_id: int | str, decision, etb_flags: Mapping[str, bool],
     for s, v in w.items():  # the invariant every rule above keeps
         r = requested[s]
         assert abs(v) <= abs(r) and (v == 0 or (v > 0) == (r > 0)), (s, r, v)
+    return w, events
+
+
+def apply_eligibility(weights: Mapping[str, float] | None, current_weights: Mapping[str, float],
+                      eligible, decision: str) -> tuple[dict[str, float] | None, list[dict]]:
+    """Agent 7's eligibility sale (§5, v1.15), after apply_risk.
+
+    weights          the risk-checked targets, or None (a hold, or an invalid day's hold)
+    current_weights  symbol -> the agent's current weight
+    eligible         today's eligible stocks (agent 3's top 5 by ret_63)
+    decision         'hold', 'rebalance', or the status of a failed day ('invalid',
+                     'unavailable', 'capped'), recorded in each event
+
+    A held stock (current weight != 0) or a non-zero target outside eligible
+    goes to 0, one event each. With nothing to sell, the weights come back
+    unchanged (None stays a hold). On a hold with something to sell, the
+    targets are the current weights with the sold stocks at 0.
+    """
+    if decision not in ("hold", "rebalance", "invalid", "unavailable", "capped"):
+        raise ValueError(f"unknown decision kind {decision!r}")
+    ok = set(eligible)
+    current = _check_weights(current_weights, "current weight")
+    w = None if weights is None else _check_weights(weights, "target weight")
+    held_out = {s for s, v in current.items() if v != 0 and s not in ok}
+    asked_out = set() if w is None else {s for s, v in w.items() if v != 0 and s not in ok}
+    out = sorted(held_out | asked_out)
+    if not out:
+        return (None if w is None else w), []
+    if w is None:
+        w = {s: v for s, v in current.items() if v != 0}
+    events = []
+    for s in out:
+        events.append(_event("forced_reduction", "eligibility", s, w.get(s, 0.0), 0.0, decision=decision,
+                             eligible=list(eligible), current_weight=current.get(s, 0.0)))
+        w[s] = 0.0
     return w, events
 
 

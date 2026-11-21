@@ -197,6 +197,9 @@ class Client:
             self.barrier.wait(timeout=10)          # every AI agent must be in flight at once
         if self.fail:
             raise LLMUnavailable("timeout: read timed out after 300 s")
+        if self.agent_id == "7":                   # only today's eligible stocks (v1.15)
+            top = json.loads(prompt.split("\nINPUT\n", 1)[1])["eligible"]
+            return reply(model, {s: 0.2 for s in top[:2]})
         return reply(model, AI_TARGETS[self.agent_id])
 
 
@@ -256,7 +259,7 @@ def test_equity_end_to_end_over_several_days(conn, clients, capsys):
     for r in reports:
         assert r.status == "ok" and r.exit_code == 0, (r.day, r.errors)
         assert r.checks_passed and not r.late
-    assert "agent 7 not built yet: skipped" in capsys.readouterr().out
+    assert "agent 13 not built yet: skipped" in capsys.readouterr().out
     for d in DAYS:
         rows = conn.execute("SELECT agent_id, equity FROM equity WHERE as_of_date = ?", (d.isoformat(),)).fetchall()
         assert sorted(r[0] for r in rows) == sorted(EQUITY_IDS)
@@ -299,7 +302,7 @@ def test_equity_end_to_end_over_several_days(conn, clients, capsys):
             assert any(j == step for j, _ in jobs), (r.day, step)
         assert not any(e == "error" for _, e, _ in rows)
         start = rows[0]
-        assert start[0] == "daily_run" and start[2]["skipped_not_built"] == ["7", "13", "14", "15"]
+        assert start[0] == "daily_run" and start[2]["skipped_not_built"] == list(roster.EQUITY_NOT_BUILT)
         for aid in EQUITY_IDS:
             assert (f"decide:{aid}", "finished") in jobs and (f"place_orders:{aid}", "finished") in jobs
     # decisions are timestamped at the decide time (close + 2:00), not before

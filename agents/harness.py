@@ -38,6 +38,12 @@ Targets are the complete portfolio; only the 22 stocks (SPY is context only);
 weights finite numbers; a non-empty reason per target; confidence in [0, 1].
 Weight limits are not checked here: the §6 risk checks clip them afterwards.
 
+Agent 7 (§5, v1.15): input.eligible is today's top 5 by ret_63 (agent 3's
+ranking). A non-zero target outside it is invalid output (one retry, then
+hold), like SPY; a weight of exactly 0 is allowed. Selling a held stock that
+left the list on a hold or an invalid day is the runner's job
+(execution.risk.apply_eligibility), not the harness's.
+
 Crypto (C1, §13, v1.12): the same harness on a crypto snapshot. The output
 spec (OUTPUT_SPEC_CRYPTO) names the 5 coins and says long only, the limits
 key is max_per_coin, and an unknown symbol's error names the coins. Long only
@@ -61,7 +67,7 @@ from agents.llm import LLMCapped, LLMClient, LLMResponse, LLMUnavailable, model_
 from agents.models import ModelConfig
 from execution.risk import profile
 from strategies.base import (BENCHMARK_SYMBOL, Context, Decision, PastDecision, Portfolio,
-                             stock_fields)
+                             ret63_top, stock_fields)
 
 if TYPE_CHECKING:  # type hints only: the harness never imports the data layer at runtime
     from data.snapshot import Snapshot
@@ -98,6 +104,12 @@ Rules:
 - Your limits are in the input; positions beyond them are cut back pro rata."""
 
 CRYPTO_AGENT_IDS = frozenset({"C0", "C1"})
+ELIGIBLE_AGENTS = frozenset({"7"})      # §5 v1.15: may only target today's top 5 by ret_63
+
+
+def eligible_for(agent_id: int | str, snapshot: "Snapshot") -> list[str] | None:
+    """Agent 7's input.eligible (agent 3's ranking, strategies.base.ret63_top); None for every other agent."""
+    return ret63_top(snapshot) if str(agent_id) in ELIGIBLE_AGENTS else None
 
 RETRY_NOTE = ("\n\nYOUR PREVIOUS REPLY WAS INVALID: {error}\n"
               "Reply again with one valid JSON object, following the OUTPUT FORMAT above.")
@@ -163,6 +175,8 @@ def prompt_input(agent_id: int | str, snapshot: "Snapshot", portfolio: Portfolio
             "unrealised_pnl": _r(shares * (close - avg)) if close is not None and avg is not None else None,
         }
     lim = profile(agent_id)
+    eligible = eligible_for(agent_id, snapshot)
+    extra = {} if eligible is None else {"eligible": eligible}
     return {
         "date": context.decision_date.isoformat(),
         "snapshot": symbols,
@@ -176,6 +190,7 @@ def prompt_input(agent_id: int | str, snapshot: "Snapshot", portfolio: Portfolio
                    "max_gross": lim.max_gross, "max_total_short": lim.max_total_short},
         "last_decisions": [_past(d) for d in past[-LAST_DECISIONS:]],
         "run": {"end_date": memory.end_date.isoformat(), "trading_days_left": int(memory.trading_days_left)},
+        **extra,
     }
 
 
@@ -222,8 +237,12 @@ def _number(x) -> bool:
     return not isinstance(x, bool) and isinstance(x, (int, float)) and math.isfinite(x)
 
 
-def parse_and_validate(text: str, universe: Sequence[str], asset_class: str = "us_equity") -> Parsed:
-    """Parse the reply and check it against the §8 format. Raises OutputError."""
+def parse_and_validate(text: str, universe: Sequence[str], asset_class: str = "us_equity",
+                       eligible: Sequence[str] | None = None) -> Parsed:
+    """Parse the reply and check it against the §8 format. Raises OutputError.
+
+    eligible (agent 7, v1.15): a non-zero weight outside it is invalid; exactly 0 is allowed (a sale).
+    """
     if not isinstance(text, str) or not text.strip():
         raise OutputError("empty reply")
     body = text.strip()
@@ -270,6 +289,9 @@ def parse_and_validate(text: str, universe: Sequence[str], asset_class: str = "u
             raise OutputError(f"unknown symbol {sym!r}; use only {what} in the snapshot")
         if not _number(w):
             raise OutputError(f"weight for {sym} must be a finite number, got {w!r}")
+        if eligible is not None and sym not in eligible and w != 0:
+            raise OutputError(f"{sym} is not in input.eligible today ({', '.join(eligible) or 'empty'}); "
+                              f"only those stocks may have a non-zero weight")
         r = reasons.get(sym)
         if not isinstance(r, str) or not r.strip():
             raise OutputError(f"missing reason for {sym}")
@@ -367,6 +389,7 @@ class AIAgent:
     def decide(self, snapshot: "Snapshot", portfolio: Portfolio, context: Context) -> AIDecision:
         base = build_prompt(self.template, self.agent_id, snapshot, portfolio, context)
         universe = tuple(stock_fields(snapshot))
+        eligible = eligible_for(self.agent_id, snapshot)
         attempts: list[AttemptRecord] = []
         prompt = base
         for _ in range(2):                    # the call, and one retry on invalid output
@@ -386,7 +409,7 @@ class AIAgent:
                 if resp.finish_reason == "length":
                     raise OutputError(f"reply cut off at the {self.model.max_tokens}-token output limit; "
                                       f"reply more briefly")
-                parsed = parse_and_validate(resp.text, universe, snapshot.asset_class)
+                parsed = parse_and_validate(resp.text, universe, snapshot.asset_class, eligible)
             except OutputError as e:
                 attempts.append(self._attempt(attempts, "invalid", prompt, resp, error=str(e)))
                 prompt = base if wrong_host else base + RETRY_NOTE.format(error=e)

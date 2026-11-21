@@ -175,5 +175,10 @@ def rank(fields: Mapping[str, Mapping], key: str) -> list[str]:
     return sorted(have, key=lambda s: (-fields[s][key], s))
 
 
+def ret63_top(snapshot: "Snapshot", n: int = 5) -> list[str]:
+    """Today's top n stocks by ret_63, exactly as agent 3 ranks them: agent 7's eligible list (§5, v1.15)."""
+    return rank(stock_fields(snapshot), "ret_63")[:n]
+
+
 def holds_any(portfolio: Portfolio, symbols) -> bool:
     return any(portfolio.holds(s) for s in symbols)
