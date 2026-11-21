@@ -208,6 +208,7 @@ def run_tick(data_dir: Path, now: Callable[[], datetime], make_deps: Callable[[]
 
 
 def _tick(data_dir, now, make_deps, trading) -> TickResult:
+    t0 = now()                                   # the tick's heartbeat is stamped at its start
     active = read_active(data_dir)
     if active is None:
         return TickResult("idle")
@@ -223,7 +224,7 @@ def _tick(data_dir, now, make_deps, trading) -> TickResult:
             raise TickError(f"{path} is labelled {exp.name!r}, not {active.name!r}")
         if active.no_ai and exp.name != DEV:
             raise TickError(f"--no-ai is only allowed on a dev label, not {exp.name!r}")
-        todo, res.skipped = due(conn, exp, now(), trading)
+        todo, res.skipped = due(conn, exp, t0, trading)
         deps = make_deps() if todo else None
         for job in todo:
             try:
@@ -252,7 +253,8 @@ def _tick(data_dir, now, make_deps, trading) -> TickResult:
     if res.errors:
         res.status = "error"
     try:
-        _tick_heartbeat(conn, tick_id, now(), {"status": res.status, "experiment": active.name,
+        _tick_heartbeat(conn, tick_id, t0, {"status": res.status, "experiment": active.name,
+                                            "finished_at": db.utc_ts(now()),
                                                "no_ai": active.no_ai, "ran": res.ran, "skipped": res.skipped,
                                                "errors": [e[:500] for e in res.errors]})
     finally:
