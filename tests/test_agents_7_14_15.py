@@ -225,3 +225,22 @@ def test_profile_and_cash_floor_unchanged():
     p = profile(7)
     assert (p.max_per_stock, p.shorts, p.max_gross, p.max_total_short) == (0.20, False, 1.0, 0.0)
     assert has_cash_floor(7) and "7" in roster.EQUITY_AI
+
+
+# ---------------------------------------------------------------------------
+# Agents 14 and 15 (roster): Claude like agent 8, Low and High limits, their own templates
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("aid,limits", [
+    ("14", {"max_per_stock": 0.10, "shorts_allowed": False, "max_gross": 1.0, "max_total_short": 0.0}),
+    ("15", {"max_per_stock": 0.30, "shorts_allowed": True, "max_gross": 1.5, "max_total_short": 0.50}),
+])
+def test_agents_14_and_15_in_the_roster(aid, limits):
+    assert aid in roster.EQUITY_AI and aid not in roster.EQUITY_NOT_BUILT
+    agent = roster.ai_agent(aid, FakeClient([]), sleep=lambda s: None)
+    assert agent.model == model_for(8) == model_for(aid)
+    assert agent.template == load_template(aid) != load_template(8)
+    p = harness.build_prompt(agent.template, aid, make_snapshot(HD), HOLDING, context())
+    inp = json.loads(p.split("\nINPUT\n")[1])
+    assert inp["limits"] == limits and "eligible" not in inp
+    assert roster.EQUITY_NOT_BUILT == ("13",)

@@ -19,8 +19,8 @@ from strategies import registry
 from strategies.base import Agent
 
 EQUITY_RULE = ("1", "2", "3", "4", "5", "6")
-EQUITY_AI = ("7", "8", "9", "10", "11", "12")
-EQUITY_NOT_BUILT = ("13", "14", "15")           # skipped, with a log line, until built
+EQUITY_AI = ("7", "8", "9", "10", "11", "12", "14", "15")
+EQUITY_NOT_BUILT = ("13",)                      # skipped, with a log line, until built
 CRYPTO_RULE = ("C0",)
 CRYPTO_AI = ("C1",)
 CRYPTO_NOT_BUILT: tuple[str, ...] = ()

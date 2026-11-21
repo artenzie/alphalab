@@ -180,6 +180,8 @@ AI_TARGETS = {
     "10": {"META": 0.1, "GOOGL": 0.1, "TSLA": -0.05},
     "11": {"COST": 0.2, "WMT": 0.2, "CVX": 0.2},
     "12": {"AMZN": 0.3},                          # clipped to 20%
+    "14": {"JNJ": 0.15, "SO": 0.1},               # JNJ clipped to 10% (Low)
+    "15": {"NVDA": 0.4, "TSLA": 0.4, "AAPL": 0.4, "XOM": -0.3},   # High: 30% cap, gross 150%
     "C1": {"BTC/USD": 0.6, "ETH/USD": 0.3},       # BTC clipped to 50%
 }
 
