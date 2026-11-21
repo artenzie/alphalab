@@ -34,6 +34,8 @@ AlphaLab is a research project that runs AI trading agents against Alpaca **pape
 | `agents/openrouter.py` | `OpenRouterClient`: pinned endpoints, no fallbacks, error mapping, key never logged |
 | `runner/daily.py` | `python -m runner.daily equity\|crypto --experiment NAME [--date D]`: one trading day in protocol order (ingest → settle → snapshot → decide → risk → orders), restart-safe, heartbeat per step, late runs (v1.13) |
 | `runner/experiment.py`, `runner/roster.py` | One DB file per experiment (`data/<name>.db`, labelled with start and end date; `create --start --end` copies market data, empty ledger); which agents run (all of them) and how they're built; `runner/blender.py`: agent 13's strategy inputs from marks up to the decision date |
+| `runner/tick.py`, `runner/status.py` | `python -m runner.tick`: runs whatever is due for the experiment named in `data/active_experiment` (gitignored; `<name> [--no-ai]`, --no-ai on dev only), max 3 attempts per day before the deadline then one settle-only run; `python -m runner.status`: last runs, outcomes, uptime (D2), tick gaps |
+| `deploy/` | systemd service + 5-minute timer for runner.tick, `sudo deploy/install.sh` |
 | `analysis/results.py` | Results report per agent from an experiment DB: returns, late and missed days, `--exclude-late`, herding (headline 8-12, supplementary 7-12/14/15, never 13) (§10) |
 | `dashboard/` | Not built yet |
 
