@@ -977,6 +977,8 @@ def main(argv: list[str] | None = None) -> int:
     where = p.add_mutually_exclusive_group(required=True)
     where.add_argument("--experiment", help="shakedown | official | ... (data/<name>.db)")
     where.add_argument("--db", type=Path, help="database path (e.g. a temp copy)")
+    p.add_argument("--no-ai", action="store_true",
+                   help="rule-based agents and C0 only, $0 (dev labels only)")
     args = p.parse_args(argv)
     path = args.db or ex.path_for(args.experiment)
     if not path.exists():
@@ -993,7 +995,7 @@ def main(argv: list[str] | None = None) -> int:
         exp = ex.require(conn)
         if args.experiment and exp.name != args.experiment:
             raise ex.ExperimentError(f"{path} is labelled {exp.name!r}, not {args.experiment!r}")
-        report = run_day(conn, asset_class, args.date, real_deps())
+        report = run_day(conn, asset_class, args.date, real_deps(), ai=not args.no_ai)
     except (ex.ExperimentError, cal.CalendarError) as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 1

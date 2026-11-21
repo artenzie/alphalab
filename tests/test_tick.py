@@ -283,3 +283,14 @@ def test_no_equity_due_on_a_holiday_or_weekend():
             assert [x.asset_class for x in todo] == ["crypto"]              # crypto runs every day
     finally:
         conn.close()
+
+
+def test_daily_cli_no_ai_refused_on_shakedown(tmp_path, monkeypatch):
+    path = make_exp(tmp_path, "shakedown", date(2026, 11, 16), date(2027, 1, 8))
+    monkeypatch.setattr(daily, "real_deps", lambda: TR.make_deps(TR.Clock(LATE), TR.Market(TR.Clock(LATE)), {}))
+    assert daily.main(["equity", "--db", str(path), "--date", "2026-11-16", "--no-ai"]) == 1
+
+
+def test_gitignore_covers_the_active_file_and_lock():
+    lines = (ROOT / ".gitignore").read_text().split()
+    assert "data/active_experiment" in lines and "data/tick.lock" in lines

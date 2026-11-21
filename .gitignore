@@ -9,3 +9,5 @@ __pycache__/
 *.db-shm
 *.db-journal
 *.lock
+data/active_experiment
+data/tick.lock
