@@ -338,3 +338,25 @@ def test_ai_input_is_consistent_across_the_split(tmp_path):
     pa, qa = p["positions"]["AAPL"], q["positions"]["AAPL"]
     assert qa["shares"] == 4 * pa["shares"] and qa["avg_cost"] == pytest.approx(pa["avg_cost"] / 4)
     assert qa["weight"] == pytest.approx(pa["weight"]) and qa["unrealised_pnl"] == pytest.approx(pa["unrealised_pnl"])
+
+
+def test_ai_input_shows_a_frozen_position_at_the_ledger_mark(tmp_path):
+    c = market(tmp_path / "split.db", True)
+    s = snap(c, EX18)
+    ctx = build_context(EX18, sessions(date(2026, 11, 16), EX18))
+    mark, shares, avg = 210.0, 10.0, 190.0                         # frozen: Tuesday's close, pre-split shares
+    pf = Portfolio(cash=50_000.0, positions={"AAPL": shares, "SPY": 1.0},
+                   value=50_000.0 + shares * mark + s.payload["symbols"]["SPY"]["last_close"])
+    mem = AgentMemory(starting_value=1e5, avg_cost={"AAPL": avg, "SPY": 600.0}, end_date=date(2027, 1, 8),
+                      trading_days_left=30, frozen={"AAPL": mark})
+    out = prompt_input("8", s, pf, replace(ctx, memory=mem))
+    a = out["portfolio"]["positions"]["AAPL"]
+    assert a["frozen"] is True and a["last_close"] == mark
+    assert a["weight"] * pf.value == pytest.approx(shares * mark, abs=pf.value * 1e-6)   # weight is rounded
+    assert a["unrealised_pnl"] == pytest.approx(shares * (mark - avg))
+    assert "frozen" not in out["portfolio"]["positions"]["SPY"]
+    assert out["snapshot"]["AAPL"]["last_close"] == s.payload["symbols"]["AAPL"]["last_close"]   # market data as is
+    # without a freeze the input is exactly what it was before v1.18 (amended): no new key anywhere
+    plain = prompt_input("8", s, pf, replace(ctx, memory=replace(mem, frozen={})))
+    assert '"frozen"' not in json.dumps(plain)
+    assert plain["portfolio"]["positions"]["AAPL"]["last_close"] == s.payload["symbols"]["AAPL"]["last_close"]

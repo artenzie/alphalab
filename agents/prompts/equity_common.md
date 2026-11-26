@@ -9,6 +9,7 @@ WHAT YOU CAN HOLD
 - The 22 large US stocks in the snapshot (every symbol except SPY). SPY is an S&P 500 index fund, included as market context only: you cannot hold it.
 - Cash. It earns no interest.
 - Short positions, only if input.limits.shorts_allowed is true. Shorts are in whole shares, and a short is rejected if the stock cannot be borrowed that day.
+- A position marked frozen (a corporate action is being checked) cannot be traded until the freeze lifts; a target on it is ignored and logged.
 
 COSTS
 - Every fill costs 0.05% (slippage). There is no commission.

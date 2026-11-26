@@ -117,9 +117,12 @@ class AgentMemory:
     # stats from its marks up to the decision date) and its current allocation (None = none yet)
     strategies: Mapping[str, Mapping] | None = None
     allocation: Mapping[str, float] | None = None
+    # v1.18: held stocks frozen under §7 rule 11 -> the ledger's frozen mark (last close before the event)
+    frozen: Mapping[str, float] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "avg_cost", MappingProxyType(dict(self.avg_cost)))
+        object.__setattr__(self, "frozen", MappingProxyType(dict(self.frozen)))
         object.__setattr__(self, "last_decisions", tuple(self.last_decisions))
 
 

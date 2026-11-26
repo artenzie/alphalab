@@ -205,7 +205,8 @@ def prompt_input(agent_id: int | str, snapshot: "Snapshot", portfolio: Portfolio
     for sym, shares in sorted(portfolio.positions.items()):
         if shares == 0:
             continue
-        close = symbols.get(sym, {}).get("last_close")
+        frozen = sym in memory.frozen            # v1.18: at the ledger's frozen mark, as in portfolio.value
+        close = memory.frozen[sym] if frozen else symbols.get(sym, {}).get("last_close")
         avg = memory.avg_cost.get(sym)
         positions[sym] = {
             "shares": _r(shares),
@@ -213,6 +214,7 @@ def prompt_input(agent_id: int | str, snapshot: "Snapshot", portfolio: Portfolio
             "weight": _r(shares * close / portfolio.value) if close is not None and portfolio.value else None,
             "avg_cost": None if avg is None else _r(avg),
             "unrealised_pnl": _r(shares * (close - avg)) if close is not None and avg is not None else None,
+            **({"frozen": True} if frozen else {}),
         }
     lim = profile(agent_id)
     eligible = eligible_for(agent_id, snapshot)

@@ -667,8 +667,10 @@ class _Day:
         current = {s: p.qty * closes[s] / pv for s, p in acct.positions.items()} if pv else {}
         ctx = ctx0
         if aid in self.ai_ids:
+            frozen = {} if self.crypto else CA.frozen_marks(self.conn, self.day, self.deps.now())
             ctx = replace(ctx0, memory=AgentMemory(
                 starting_value=L.START_CASH, avg_cost={s: p.avg_cost for s, p in acct.positions.items()},
+                frozen={s: m for s, m in frozen.items() if s in acct.positions},
                 last_decisions=past_decisions(self.conn, aid, self.ac, self.day),
                 end_date=run[0], trading_days_left=run[1]))
         return portfolio, ctx, current

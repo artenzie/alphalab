@@ -6,6 +6,7 @@ history (adj = raw / 4 before the ex-date) arrives with the ex-date's ingest (on
 day's (the lag case), as new price versions, the way the ingest's history re-fetch stores them.
 """
 
+import json
 import sys
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
@@ -208,4 +209,35 @@ def test_freeze_shows_on_the_status_page_summary_and_alerts(tmp_path):
     assert [r[0] for r in c.execute("SELECT event FROM alerts WHERE key = ? ORDER BY alert_id", (key,))] == \
         ["open", "resolved"]
     assert sp.load(tmp_path, fetch + timedelta(hours=1), tmp_path / "none.json", trading=TR.no_network)["freezes"] == []
+    c.close()
+
+
+def _position_line(prompt, sym):
+    start = prompt.index("{", prompt.rindex("\n{") if "\n{" in prompt else 0)
+    data = json.loads(prompt[start:])
+    return data["portfolio"]["positions"].get(sym)
+
+
+def test_ai_agents_are_prompted_with_the_frozen_position(tmp_path):
+    path = TT.make_exp(tmp_path)
+    TT.activate(tmp_path, "dev")
+    w = TT.World(tmp_path, market=LagMarket)
+    c = db.connect(path)
+    seen = {}
+    for d in DAYS[:4]:                                          # Mon..Thu: frozen on Wed, split applied Thu
+        fetch = TT.eq_fetch(d, c)
+        n = {a: len(w.clients[a].calls) for a in ("8", "15")}
+        w.tick(fetch)
+        for a in ("8", "15"):
+            new = w.clients[a].calls[n[a]:]
+            if new:
+                seen[(a, d)] = _position_line(new[-1], SYM)
+    tue, wed, thu = DAYS[1], DAYS[2], DAYS[3]
+    for a in ("8", "15"):
+        assert seen[(a, tue)] is not None and "frozen" not in seen[(a, tue)]
+        p = seen[(a, wed)]
+        assert p["frozen"] is True and p["last_close"] == pytest.approx(TR.eq_close(SYM, tue), rel=1e-6)
+        assert p["unrealised_pnl"] == pytest.approx(p["shares"] * (p["last_close"] - p["avg_cost"]), rel=1e-6, abs=0.01)
+        assert "frozen" not in seen[(a, thu)]                    # lifted: post-split shares at the close
+        assert seen[(a, thu)]["shares"] == pytest.approx(4 * p["shares"], rel=1e-6)
     c.close()
