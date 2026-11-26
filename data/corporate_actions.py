@@ -28,7 +28,10 @@ Verdicts (symbol_events). For a stock and an ex-date, from what is stored by `no
   freeze   anything else that isn't "nothing": a step with no announcement, an announcement the
            step doesn't confirm (the lag case: Alpaca's announcement is known but the prices
            aren't adjusted yet), a missing or zero ratio, two actions at once, or any other type
+           (a name change to a new ticker included)
   nothing  no action and no step
+A name change that keeps the ticker (old_symbol == new_symbol: a new CUSIP) is set aside before
+judging and logged only (review's `noted`, the runner's heartbeat), as XOM's of 2 Jul 2026.
 The latest row per (symbol, ex_date) decides. review() writes a row only when the verdict
 changes; a resolution references the freeze it ends (corrects_id). An open freeze is judged
 again on every review, so it lifts by itself once a later fetch confirms the split (the ledger
@@ -46,7 +49,7 @@ import sqlite3
 import sys
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
-from typing import Any, Callable, Iterable
+from typing import Any, Callable, Iterable, Mapping
 
 from data import db
 
@@ -174,6 +177,7 @@ class Verdict:
     ratio: float | None
     reason: str
     action_ids: tuple[int, ...] = ()
+    noted: tuple[dict, ...] = ()     # actions logged only (a name change that keeps the ticker)
 
 
 def actions_for(conn: sqlite3.Connection, symbol: str, ex_date: str, now: datetime) -> list[sqlite3.Row]:
@@ -206,9 +210,24 @@ def _same(a: float, b: float) -> bool:
     return abs(a / b - 1) <= SPLIT_TOL
 
 
+def same_ticker_rename(action: Mapping[str, Any]) -> bool:
+    """A name change that keeps the ticker (a new CUSIP, say): logged only, never frozen (v1.18)."""
+    if action["ca_type"] != "name_change":
+        return False
+    raw = json.loads(action["raw"] or "{}")
+    return bool(raw.get("new_symbol")) and raw.get("new_symbol") == raw.get("old_symbol") == action["symbol"]
+
+
 def judge(conn: sqlite3.Connection, symbol: str, ex_date: str, now: datetime) -> Verdict:
-    acts = actions_for(conn, symbol, ex_date, now)
-    step = price_step(conn, symbol, ex_date, now)
+    every = actions_for(conn, symbol, ex_date, now)
+    noted = tuple({"ca_id": a["ca_id"], "symbol": symbol, "ex_date": ex_date, "ca_type": a["ca_type"],
+                   "reason": "name change keeps the ticker: logged only"} for a in every if same_ticker_rename(a))
+    acts = [a for a in every if not same_ticker_rename(a)]
+    v = _verdict(acts, symbol, ex_date, price_step(conn, symbol, ex_date, now))
+    return Verdict(v.event, v.ratio, v.reason, v.action_ids, noted)
+
+
+def _verdict(acts: list, symbol: str, ex_date: str, step: float | None) -> Verdict:
     ids = tuple(a["ca_id"] for a in acts)
     stepped = step is not None and not _same(step, 1.0)
     if not acts:
@@ -260,9 +279,11 @@ def _write(conn, symbol: str, ex_date: str, v: Verdict, now: datetime, source: s
          corrects)).lastrowid
 
 
-def review(conn: sqlite3.Connection, day: date, symbols: Iterable[str], now: datetime) -> list[dict]:
+def review(conn: sqlite3.Connection, day: date, symbols: Iterable[str], now: datetime,
+           noted: list[dict] | None = None) -> list[dict]:
     """Judge every stock for ex-date `day` (and any action dated since its last bar), and every
-    open freeze again. Writes a symbol_events row where the verdict changed; returns those rows."""
+    open freeze again. Writes a symbol_events row where the verdict changed; returns those rows.
+    Actions logged only (a name change that keeps the ticker) are appended to `noted`."""
     written = []
     d = day.isoformat()
     with conn:
@@ -282,6 +303,8 @@ def review(conn: sqlite3.Connection, day: date, symbols: Iterable[str], now: dat
             if prev is not None and prev["source"] == "manual":
                 continue
             v = judge(conn, sym, ex, now)
+            if noted is not None:
+                noted.extend(v.noted)
             if prev is None:
                 if v.event == "none":
                     continue

@@ -399,13 +399,15 @@ class _Day:
             symbols = [r[0] for r in self.conn.execute(
                 "SELECT DISTINCT symbol FROM prices WHERE asset_class = 'us_equity' ORDER BY symbol")]
             now = self.deps.now()
-            written = CA.review(self.conn, self.day, symbols, now)
+            noted: list[dict] = []
+            written = CA.review(self.conn, self.day, symbols, now, noted)
             frozen = sorted(CA.frozen(self.conn, self.day, now))
         except Exception as exc:  # noqa: BLE001
             self.hb(CA.JOB, "error", step="review", error=_err(exc))
             self.hb.errors.append(f"{CA.JOB}: review failed: {_err(exc)}")
             return
-        self.hb(CA.JOB, "finished", step="review", date=self.day.isoformat(), verdicts=written, frozen=frozen)
+        self.hb(CA.JOB, "finished", step="review", date=self.day.isoformat(), verdicts=written, frozen=frozen,
+                **({"noted": noted} if noted else {}))
 
     def settle(self) -> set[str]:
         self.hb("settle", "started", agents=list(self.ids))

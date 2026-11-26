@@ -256,3 +256,53 @@ def test_manual_resolution_is_a_new_entry_and_review_leaves_it(conn):
     assert ca.review(conn, EX, ["AAPL"], t + timedelta(minutes=15)) == []
     with pytest.raises(ca.CorporateActionError):
         ca.resolve(conn, "AAPL", EX.isoformat(), t + timedelta(minutes=20), None)
+
+
+# --- name changes (v1.18 amended) -----------------------------------------------------
+
+XOM_2026_07_02 = {"name_changes": [{"id": "71daae23-2985-4549-870e-a6d678474b6b", "new_cusip": "30233Q108",
+                                    "new_symbol": "XOM", "old_cusip": "30231G102", "old_symbol": "XOM",
+                                    "process_date": "2026-07-02"}]}      # as Alpaca returned it
+
+
+def xom_world(conn, step=1.0):
+    """XOM bars to Wed 1 Jul 2026 (raw / adj = step on the last), then 2 Jul."""
+    for i, d in enumerate(TI.weekdays(date(2026, 6, 1), date(2026, 7, 2))):
+        b = TI.bar(bar_ts(d), close=100.0 + i)
+        a = b if d == date(2026, 7, 2) or step == 1.0 else TI.SimpleNamespace(**{**vars(b), **{
+            k: getattr(b, k) / step for k in ("open", "high", "low", "close")}, "volume": b.volume * step})
+        rows = [ingest.make_row("XOM", "us_equity", d.isoformat(), b, a, "iex")]
+        ingest.store(conn, rows, db.utc_ts(after_close(d)), ingest.Stats())
+
+
+def test_replay_of_xoms_cusip_change_is_logged_only(conn):
+    xom_world(conn)
+    t = after_close(date(2026, 7, 2))
+    assert ca.fetch(conn, FakeCorporate(XOM_2026_07_02), ["XOM"], lambda: t, lambda s: None)["inserted"] == 1
+    row = conn.execute("SELECT * FROM corporate_actions").fetchone()
+    assert (row["ca_type"], row["symbol"], row["ex_date"]) == ("name_change", "XOM", "2026-07-02")
+    noted = []
+    assert ca.review(conn, date(2026, 7, 2), ["XOM"], t + timedelta(minutes=5), noted) == []
+    assert conn.execute("SELECT COUNT(*) FROM symbol_events").fetchone()[0] == 0
+    assert ca.frozen(conn, date(2026, 7, 2), t + timedelta(minutes=5)) == {}
+    assert [(n["symbol"], n["ex_date"], n["ca_type"], n["ca_id"]) for n in noted] == \
+        [("XOM", "2026-07-02", "name_change", row["ca_id"])]
+
+
+def test_change_of_ticker_freezes(conn):
+    xom_world(conn)
+    t = after_close(date(2026, 7, 2))
+    renamed = {"name_changes": [{**XOM_2026_07_02["name_changes"][0], "new_symbol": "XOMX"}]}
+    ca.fetch(conn, FakeCorporate(renamed), ["XOM"], lambda: t, lambda s: None)
+    rows = ca.review(conn, date(2026, 7, 2), ["XOM"], t + timedelta(minutes=5))
+    assert [(r["event"], r["reason"]) for r in rows] == [("freeze", "name_change on 2026-07-02")]
+
+
+def test_same_ticker_rename_doesnt_hide_an_unexplained_price_step(conn):
+    xom_world(conn, step=2.0)                          # the bars before 2 Jul show a 2x step, no split announced
+    t = after_close(date(2026, 7, 2))
+    ca.fetch(conn, FakeCorporate(XOM_2026_07_02), ["XOM"], lambda: t, lambda s: None)
+    noted = []
+    rows = ca.review(conn, date(2026, 7, 2), ["XOM"], t + timedelta(minutes=5), noted)
+    assert [r["event"] for r in rows] == ["freeze"] and "no announcement" in rows[0]["reason"]
+    assert len(noted) == 1
