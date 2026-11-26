@@ -7,9 +7,13 @@
 
 What is sent (each queued in the experiment DB's append-only `alerts` table, sent from there):
   * problems, once each, plus one "resolved" when they recover (priority 4, resolved 2):
-      error:<ac>:<date>   a daily_run ended in error, no ok run yet, the deadline still ahead
-      missed:<ac>:<date>  the decision deadline passed without an ok run (supersedes error:);
-                          resolved when that day, or a later day of the same asset class, runs ok
+      error:<ac>:<date>   a daily_run ended in error, no ok run yet, the deadline still ahead;
+                          or, past the deadline, STUCK_AFTER settle-only runs failed to mark the
+                          day (later days of that asset class wait: correct it by hand), opened
+                          once; resolved when the day finishes ok or missed
+      missed:<ac>:<date>  the decision deadline passed without an ok run, opened once ever (never
+                          re-opened after it is resolved); resolved when that day, or a later day
+                          of the same asset class, runs ok
       tick                the last tick failed for a reason that is not a run's own error
       credit_low          OpenRouter credit left (total_credits - total_usage) under $5 (priority 3)
   * notices, once per key:
@@ -57,6 +61,7 @@ OPENROUTER_KEY_URL = "https://openrouter.ai/api/v1/key"
 OPENROUTER_CREDITS_URL = "https://openrouter.ai/api/v1/credits"
 TIMEOUT = 10                              # seconds, every network call
 LOOKBACK_DAYS = 7
+STUCK_AFTER = 2                           # failed settle-only runs past the deadline before error:
 UNFINISHED_AFTER = timedelta(hours=3)     # a run with no finish row this old died (TimeoutStartSec)
 SPEND_SHARE = 0.8
 CREDIT_FLOOR = 5.0
@@ -218,6 +223,7 @@ def check_runs(conn, now: datetime, trading: Any = None) -> None:
         for d in tick.run_days(conn, ac, start, end, now, trading):
             runs = _runs(conn, ac, d, now)
             ok = [r for r in runs if r["status"] == "ok"]
+            missed = [r for r in runs if r["status"] == "missed"]
             err_key, miss_key = f"error:{ac}:{d}", f"missed:{ac}:{d}"
             if ok:
                 last_ok = d
@@ -227,11 +233,26 @@ def check_runs(conn, now: datetime, trading: Any = None) -> None:
                 continue
             deadline = cal.decision_deadline(ac, d, conn, trading)
             if now > deadline:
-                why = (f"{len(runs)} run(s), none ok; last error: {_first_error(conn, runs[-1]['run_id'])}"
-                       if runs else "no run started at all")
-                open_problem(conn, miss_key, f"MISSED {name} {_fmt_day(d)}",
-                             f"{name} {d}: past its decision deadline ({deadline:%d %b %H:%M}Z) with no ok run. "
-                             f"{why}. Nobody trades that day; runner.status shows it as a gap.", now)
+                if missed:
+                    why = "held: every agent settled, marked and margin-checked (settle-only run)"
+                elif runs:
+                    why = f"{len(runs)} run(s), none ok yet; last error: {_first_error(conn, runs[-1]['run_id'])}"
+                else:
+                    why = "no run started at all"
+                if not has_key(conn, miss_key):          # once ever: a resolved missed day stays resolved
+                    queue(conn, miss_key, "open", f"MISSED {name} {_fmt_day(d)}",
+                          f"{name} {d}: past its decision deadline ({deadline:%d %b %H:%M}Z) with no ok run. "
+                          f"{why}. Nobody decides that day; runner.status shows it as missed.", HIGH, now)
+                if missed:
+                    resolve(conn, err_key, f"MARKED {name} {_fmt_day(d)}",
+                            f"{name} {d}: every agent is marked now (missed day, held).", now)
+                    continue
+                failed = [r for r in runs if r["started"] > deadline and r["status"] == "error"]
+                if len(failed) >= STUCK_AFTER and not _opened_since(conn, err_key, deadline):
+                    queue(conn, err_key, "open", f"MARKS MISSING {name} {_fmt_day(d)}",
+                          f"{name} {d}: {len(failed)} settle-only runs after the deadline failed to mark every "
+                          f"agent; later {name} days wait for it. Last error: "
+                          f"{_first_error(conn, failed[-1]['run_id'])}. Needs a manual correction.", HIGH, now)
             else:
                 errs = [r for r in runs if r["status"] == "error"]
                 if errs:
@@ -245,6 +266,11 @@ def check_runs(conn, now: datetime, trading: Any = None) -> None:
                 if gap < last_ok.isoformat():
                     resolve(conn, key, f"RECOVERED {name}",
                             f"{name} {last_ok} ran ok; {gap} stays a gap.", now)
+
+
+def _opened_since(conn, key: str, t: datetime) -> bool:
+    return conn.execute("SELECT 1 FROM alerts WHERE key = ? AND event = 'open' AND created_at > ? LIMIT 1",
+                        (key, db.utc_ts(t))).fetchone() is not None
 
 
 def check_tick(conn, now: datetime) -> None:
@@ -316,14 +342,12 @@ def _cost(conn, ac: str, d: date) -> tuple[float, int]:
 
 
 def equity_final(conn, d: date, now: datetime, trading: Any = None) -> tuple[bool, dict | None]:
-    """(is the equity day final, its ok run or None): ok, or the settle-only run after the deadline ran."""
+    """(is the equity day final, its ok run or None): a run finished ok, or one finished missed."""
     runs = _runs(conn, "us_equity", d, now)
     ok = next((r for r in runs if r["status"] == "ok"), None)
     if ok:
         return True, ok
-    deadline = cal.decision_deadline("us_equity", d, conn, trading)
-    after = [r for r in runs if r["started"] > deadline and r["status"] != "unfinished"]
-    return (now > deadline and bool(after)), None
+    return any(r["status"] == "missed" for r in runs), None
 
 
 def summary_text(conn, d: date, now: datetime, ok_run: dict | None, marker: dict | None,
@@ -336,7 +360,7 @@ def summary_text(conn, d: date, now: datetime, ok_run: dict | None, marker: dict
             if m and m[0] is not None:
                 state += f" by {m[0]} min"
     else:
-        state = "MISSED (settle-only after the deadline)"
+        state = "MISSED (held: settled, marked, margin-checked after the deadline)"
     cost, calls = _cost(conn, "us_equity", d)
     lines = [f"equity {d}: {state}", f"AI cost ${cost:.4f} ({calls} priced calls)"]
     s = st.summary(conn, now, trading=trading)
