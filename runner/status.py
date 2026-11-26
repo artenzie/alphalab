@@ -11,10 +11,13 @@ Scheduled runs: every day of the run whose protocol fetch time has passed (NYSE 
 equity, every calendar day for crypto; the same days runner.tick runs). Each is
   ok        a daily_run finished with status ok, on time
   late      finished ok from a late snapshot (v1.13)
-  error     runs started, none finished ok
+  missed    past the deadline: a settle-only run finished missed (every agent held, marked and
+            margin-checked, §3, v1.17); nobody decided that day
+  error     runs started, none finished ok or missed (past the deadline: marks still incomplete)
   missing   no run started at all
   pending   not finished ok yet, and its decision deadline hasn't passed (left out of uptime)
-Uptime (D2: 99% or more keeps the engine on the Pi) = (ok + late) / (ok + late + error + missing).
+Uptime (D2: 99% or more keeps the engine on the Pi) = (ok + late) / (ok + late + missed + error + missing):
+a missed day is downtime.
 The on-time share is ok / the same total.
 
 Tick gaps: intervals over GAP_MIN minutes from the end of one tick to the start of the next (and
@@ -56,7 +59,7 @@ class Status:
     gaps: list[tuple[datetime, datetime]] = field(default_factory=list)
 
     def counts(self) -> dict[str, int]:
-        out = {k: 0 for k in ("ok", "late", "error", "missing", "pending")}
+        out = {k: 0 for k in ("ok", "late", "missed", "error", "missing", "pending")}
         for d in self.days:
             out[d["outcome"]] += 1
         return out
@@ -64,7 +67,7 @@ class Status:
     @property
     def scheduled(self) -> int:
         c = self.counts()
-        return c["ok"] + c["late"] + c["error"] + c["missing"]
+        return c["ok"] + c["late"] + c["missed"] + c["error"] + c["missing"]
 
     @property
     def uptime(self) -> float | None:
@@ -106,6 +109,8 @@ def summary(conn: sqlite3.Connection, now: datetime, since: date | None = None, 
             ok = [r for r in runs if r["status"] == "ok"]
             if ok:
                 outcome = "late" if ok[0]["late"] else "ok"
+            elif any(r["status"] == "missed" for r in runs):
+                outcome = "missed"
             elif now <= cal.decision_deadline(ac, d, conn, trading):
                 outcome = "pending"
             else:
@@ -155,7 +160,7 @@ def format_status(st: Status, verbose: bool = False) -> str:
                                       + (" (late)" if r["late"] else "")))
     lines += ["", "Errors in the last 24 h: " + (", ".join(f"{j} x{n}" for j, n in st.errors_24h.items()) or "none")]
     c = st.counts()
-    lines += ["", f"Scheduled runs: {st.scheduled} (ok {c['ok']}, late {c['late']}, error {c['error']}, "
+    lines += ["", f"Scheduled runs: {st.scheduled} (ok {c['ok']}, late {c['late']}, missed {c['missed']}, error {c['error']}, "
                   f"missing {c['missing']}; pending {c['pending']})"]
     if st.uptime is not None:
         lines.append(f"Uptime (D2: >= 99% keeps the engine on the Pi): {st.uptime:.1%}; on time {st.on_time:.1%}")

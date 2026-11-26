@@ -28,7 +28,7 @@ def outcomes(st):
     return {(d["asset_class"], d["date"]): d["outcome"] for d in st.days}
 
 
-def test_ok_late_error_missing_pending_and_a_tick_gap(tmp_path):
+def test_ok_late_missed_missing_pending_and_a_tick_gap(tmp_path):
     path = make_exp(tmp_path)
     activate(tmp_path, "dev")
     w = World(tmp_path, market=TT.CatchUpMarket)
@@ -47,15 +47,15 @@ def test_ok_late_error_missing_pending_and_a_tick_gap(tmp_path):
     assert o[("crypto", "2026-11-17")] == "pending"           # deadline 23:15Z on the 18th
     assert st.scheduled == 3 and abs(st.uptime - 1 / 3) < 1e-12
     assert len(st.gaps) == 1 and st.gaps[0][1] == now            # from the last tick to now
-    # back on: the catch-up tick settles the missed days (error: nobody decided) and runs crypto 17 late
+    # back on: the catch-up tick settles the days past their deadline (missed: held) and runs crypto 17 late
     w.tick(datetime(2026, 11, 18, 13, 40, tzinfo=UTC))
     now = datetime(2026, 11, 18, 13, 45, tzinfo=UTC)
     st = status.summary(ro(path), now, trading=TT.TR.no_network)
     o = outcomes(st)
-    assert o[("us_equity", "2026-11-17")] == "error" and o[("crypto", "2026-11-16")] == "error"
+    assert o[("us_equity", "2026-11-17")] == "missed" and o[("crypto", "2026-11-16")] == "missed"
     assert o[("crypto", "2026-11-17")] == "late"
     c = st.counts()
-    assert (c["ok"], c["late"], c["error"], c["missing"], c["pending"]) == (1, 1, 2, 0, 0)
+    assert (c["ok"], c["late"], c["missed"], c["error"], c["missing"], c["pending"]) == (1, 1, 2, 0, 0, 0)
     assert st.uptime == 0.5 and st.on_time == 0.25
     gap = st.gaps[0]                                          # from the end of the last tick on the 16th
     assert len(st.gaps) == 1 and gap[1] == datetime(2026, 11, 18, 13, 40, tzinfo=UTC)
@@ -63,7 +63,7 @@ def test_ok_late_error_missing_pending_and_a_tick_gap(tmp_path):
     assert st.last_runs["crypto"]["date"] == "2026-11-17" and st.last_runs["crypto"]["late"]
     text = status.format_status(st)
     assert "Uptime (D2" in text and "50.0%" in text and "Gaps over 10 min: 1" in text
-    assert "us_equity 2026-11-17  error" in text
+    assert "us_equity 2026-11-17  missed" in text and "missed 2, error 0" in text
 
 
 def test_a_long_tick_is_not_a_gap(tmp_path):
