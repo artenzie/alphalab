@@ -420,12 +420,14 @@ def settle_day(conn: sqlite3.Connection, agent_id: str, day: date, now: datetime
 
 def place_orders(conn: sqlite3.Connection, agent_id: str, day: date, closes: Mapping[str, float],
                  targets: Mapping[str, float] | None, created_at: datetime,
-                 decision_id: int | None = None) -> Placed:
+                 decision_id: int | None = None, computed_at: datetime | None = None) -> Placed:
     """Turn day's (risk-checked) targets into pending orders, after the margin check (rule 8).
 
     closes are the snapshot closes the agent saw. targets None = hold. The
     margin check always runs and is always logged; a non-hold decision
     replaces the forced reduction (its targets already satisfy the margin rule).
+    computed_at (protocol v1.17): when created_at is the protocol schedule time rather than
+    now (a past-deadline day), the real computation time, recorded in each margin event's detail.
     """
     agent_id = str(agent_id)
     if targets is not None and decision_id is None:
@@ -445,6 +447,9 @@ def place_orders(conn: sqlite3.Connection, agent_id: str, day: date, closes: Map
         superseded = bool(m_events) and targets is not None
         if superseded:
             m_events = [{**e, "detail": json.dumps({**json.loads(e["detail"]), "superseded_by_decision": True},
+                                                   sort_keys=True)} for e in m_events]
+        if computed_at is not None:
+            m_events = [{**e, "detail": json.dumps({**json.loads(e["detail"]), "computed_at": db.utc_ts(computed_at)},
                                                    sort_keys=True)} for e in m_events]
         ev_ids = write_risk_events(conn, agent_id, m_events, created_at)
         if targets is not None:
