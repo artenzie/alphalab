@@ -37,9 +37,9 @@ AlphaLab is a research project that runs AI trading agents against Alpaca **pape
 | `runner/tick.py`, `runner/status.py` | `python -m runner.tick`: runs whatever is due for the experiment named in `data/active_experiment` (gitignored; `<name> [--no-ai]`, --no-ai on dev only), max 3 attempts per day before the deadline then one settle-only run; `python -m runner.status`: last runs, outcomes, uptime (D2), tick gaps |
 | `runner/alerts.py` | Phone alerts via ntfy.sh (`NTFY_TOPIC`): run errors, missed days, tick failures (open/resolved once each), daily equity summary, OpenRouter spend 80% and credit < $5; queue in the append-only `alerts`/`alert_sends` tables, sent after each tick, never failing it; healthchecks.io ping (`HEALTHCHECKS_URL`) during every tick; `python -m runner.alerts test` |
 | `runner/backup.py` | Nightly backup files (online backup, integrity_check, gzip, manifest) and the restore drill (`drill --to DIR`) |
-| `deploy/` | systemd units: 5-minute timer for runner.tick, 02:30 UTC timer for `backup.sh` (rclone to `gdrive:alphalab-backups`, 30 days); `sudo deploy/install.sh` installs both |
+| `deploy/` | systemd units: 5-minute timer for runner.tick, 02:30 UTC timer for `backup.sh` (rclone to `gdrive:alphalab-backups`, 30 days), `alphalab-status.service` (the status page, Restart=always); `sudo deploy/install.sh` installs all three |
 | `analysis/results.py` | Results report per agent from an experiment DB: returns, late and missed days, `--exclude-late`, herding (headline 8-12, supplementary 7-12/14/15, never 13) (§10) |
-| `dashboard/` | Not built yet |
+| `dashboard/status_page.py` | Plain read-only status page (`python -m dashboard.status_page`): binds to the tailscale0 IPv4 only, port 8080, never 0.0.0.0; DB opened mode=ro per request, cached calendar only; shows runner.status plus equity and return since start, last decision per AI agent, AI cost today and month to date (from the DB), last backup, open alerts; standard library only |
 
 ## Working here
 

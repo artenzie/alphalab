@@ -1,0 +1,26 @@
+# AlphaLab status page (dashboard/status_page.py): read-only, on the tailscale0 IPv4, port 8080.
+# It binds to that address only (never 0.0.0.0); if tailscale0 has no address yet it exits 1
+# and Restart=always tries again.
+[Unit]
+Description=AlphaLab status page (read-only, Tailscale only)
+After=tailscaled.service network-online.target
+Wants=tailscaled.service network-online.target
+
+[Service]
+Type=simple
+User=artem
+Group=artem
+WorkingDirectory=/home/artem/alphalab
+ExecStart=/home/artem/alphalab/venv/bin/python -m dashboard.status_page
+Restart=always
+RestartSec=10
+Environment=PYTHONUNBUFFERED=1
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=alphalab-status
+NoNewPrivileges=yes
+PrivateTmp=yes
+Nice=10
+
+[Install]
+WantedBy=multi-user.target
