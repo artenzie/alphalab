@@ -16,6 +16,8 @@ What is sent (each queued in the experiment DB's append-only `alerts` table, sen
                           of the same asset class, runs ok
       tick                the last tick failed for a reason that is not a run's own error
       credit_low          OpenRouter credit left (total_credits - total_usage) under $5 (priority 3)
+      freeze:<sym>:<ex>   a stock frozen by its corporate actions (§7 rule 11, v1.18): held at its
+                          last close, orders in it rejected; resolved when the freeze lifts
   * notices, once per key:
       summary:us_equity:<date>  after each equity day is final (priority 2): status, late, AI cost,
                                 every agent's equity and day return, the last crypto run, the last backup
@@ -48,6 +50,7 @@ from typing import Any, Callable
 import requests
 
 from data import calendar as cal
+from data import corporate_actions as CA
 from data import db
 from runner import daily
 from runner import experiment as ex
@@ -368,6 +371,7 @@ def summary_text(conn, d: date, now: datetime, ok_run: dict | None, marker: dict
     lines.append("crypto: none yet" if c is None else
                  f"crypto {c['date']}: {c['status']}" + (" (late)" if c["late"] else ""))
     lines.append(backup_line(now, marker))
+    lines += freeze_lines(conn, now)
     lines.append("")
     for aid, eq, ret in _equity_rows(conn, d):
         lines.append(f"{aid:>3}  ${eq:>11,.0f}  " + ("   -   " if ret is None else f"{ret:+7.2%}"))
@@ -506,8 +510,35 @@ class Hooks:
     trading: Any = None
 
 
+def check_freezes(conn, now: datetime) -> None:
+    """One high-priority alert per frozen stock (v1.18), resolved once when its freeze lifts."""
+    open_now = {}
+    for f in CA.open_freezes(conn, now):
+        key = f"freeze:{f['symbol']}:{f['ex_date']}"
+        open_now[key] = f
+        try:
+            held = f" Held at ${CA.frozen_mark(conn, f['symbol'], f['ex_date'], now):,.2f} (its last close before)."
+        except CA.CorporateActionError:
+            held = ""
+        open_problem(conn, key, f"{f['symbol']} frozen ({f['ex_date']})",
+                     f"{f['reason']}.{held} No new orders in it; every other stock settles as usual. Lifts by itself "
+                     f"on a confirming fetch, or: python -m data.corporate_actions resolve {f['symbol']} "
+                     f"{f['ex_date']} --ratio R | --no-change --experiment <name>", now, HIGH)
+    for key in open_keys(conn, "freeze:"):
+        if key not in open_now:
+            _, sym, ex_date = key.split(":", 2)
+            e = CA.latest_event(conn, sym, ex_date)
+            resolve(conn, key, f"{sym} unfrozen ({ex_date})",
+                    f"{e['event']}: {e['reason']}" if e is not None else "no longer frozen", now)
+
+
+def freeze_lines(conn, now: datetime) -> list[str]:
+    return [f"FROZEN {f['symbol']} (ex {f['ex_date']}): {f['reason']}" for f in CA.open_freezes(conn, now)]
+
+
 def run_checks(conn, t0: datetime, now: Callable[[], datetime], hooks: Hooks, spend: bool) -> tuple[int, int]:
     steps = [("runs", lambda: check_runs(conn, now(), hooks.trading)),
+             ("freezes", lambda: check_freezes(conn, now())),
              ("tick", lambda: check_tick(conn, now())),
              ("summary", lambda: check_summary(conn, now(), read_backup_marker(hooks.marker), hooks.trading))]
     if spend:

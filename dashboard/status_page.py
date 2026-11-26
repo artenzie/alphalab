@@ -5,7 +5,7 @@
 
 Shows what runner.status prints, plus each agent's latest equity and return since start, the
 last decision per AI agent, today's and the month's AI cost (recorded in the DB), the last
-backup, and the open alerts. The experiment is the one named in data/active_experiment, read
+backup, the open alerts, and the frozen stocks (§7 rule 11, v1.18) with their reasons. The experiment is the one named in data/active_experiment, read
 again on every request.
 
 Read-only by construction: every request opens the DB with SQLite mode=ro and closes it, and
@@ -32,6 +32,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Callable
 
+from data import corporate_actions as CA
 from data import db
 from execution.ledger import START_CASH
 from runner import alerts, daily, status, tick
@@ -117,6 +118,19 @@ def open_alerts(conn: sqlite3.Connection) -> list[dict]:
     return [dict(r) for r in rows]
 
 
+def freezes(conn: sqlite3.Connection, now: datetime) -> list[dict]:
+    """Open freezes (§7 rule 11, v1.18), each with the price it is held at."""
+    out = []
+    for f in CA.open_freezes(conn, now):
+        try:
+            held = CA.frozen_mark(conn, f["symbol"], f["ex_date"], now)
+        except CA.CorporateActionError:
+            held = None
+        out.append({"symbol": f["symbol"], "ex_date": f["ex_date"], "since": f["decided_at"], "reason": f["reason"],
+                    "held_at": held})
+    return out
+
+
 def page_data(conn: sqlite3.Connection, now: datetime, marker: dict | None,
               experiment: str = "?", no_ai: bool = False, trading: Any = None) -> dict:
     """Everything the page shows. A section that fails holds its error instead of failing the page."""
@@ -130,6 +144,7 @@ def page_data(conn: sqlite3.Connection, now: datetime, marker: dict | None,
         "cost_today": lambda: ai_cost(conn, today, today),
         "cost_month": lambda: ai_cost(conn, today.replace(day=1), today),
         "alerts": lambda: open_alerts(conn),
+        "freezes": lambda: freezes(conn, now),
     }
     out["errors"] = {}
     for name, fn in sections.items():
@@ -187,6 +202,13 @@ def render(d: dict) -> str:
     parts.append(_err(d, "alerts") or ("<p>none</p>" if not a else
                  _table(["since", "key", "title", "priority"],
                         [[x["created_at"], x["key"], x["title"], x["priority"]] for x in a])))
+
+    parts.append("<h2>Frozen stocks</h2>")
+    fz = d["freezes"]
+    parts.append(_err(d, "freezes") or ("<p>none</p>" if not fz else
+                 _table(["stock", "ex-date", "since", "held at", "reason"],
+                        [[x["symbol"], x["ex_date"], x["since"],
+                          None if x["held_at"] is None else f"${x['held_at']:,.2f}", x["reason"]] for x in fz])))
 
     parts.append("<h2>Backup</h2>")
     parts.append(f"<p>{_e(d['backup'])}</p>")
