@@ -130,11 +130,13 @@ class Clients:
     trading: Any  # alpaca.trading.client.TradingClient
     stock: Any    # alpaca.data.historical.StockHistoricalDataClient
     crypto: Any   # alpaca.data.historical.CryptoHistoricalDataClient
+    corporate: Any = None   # alpaca.data.historical.CorporateActionsClient (raw data); None: not fetched
 
 
 def make_clients() -> Clients:
     from dotenv import load_dotenv
     from alpaca.data.historical import CryptoHistoricalDataClient, StockHistoricalDataClient
+    from alpaca.data.historical.corporate_actions import CorporateActionsClient
     from alpaca.trading.client import TradingClient
 
     load_dotenv(ROOT / ".env")
@@ -145,6 +147,7 @@ def make_clients() -> Clients:
         trading=TradingClient(key, secret, paper=True),
         stock=StockHistoricalDataClient(key, secret),
         crypto=CryptoHistoricalDataClient(key, secret),
+        corporate=CorporateActionsClient(key, secret, raw_data=True),
     )
 
 
@@ -485,6 +488,53 @@ def build_rows(equity_raw, equity_split, crypto, now: datetime, stats: Stats,
     return rows
 
 
+def corporate_actions_step(conn, clients: Clients, symbols: list[str], run_id: str,
+                           now: Callable[[], datetime], sleep) -> None:
+    """§7 rule 11 (v1.18): fetch the universe's corporate actions. A failure is an error heartbeat
+    (job 'corporate_actions') but never fails the ingest: a missing announcement ends in a freeze,
+    never in a wrong split."""
+    from data import corporate_actions as ca
+
+    if clients.corporate is None:
+        return
+    try:
+        counts = ca.fetch(conn, clients.corporate, symbols, now, sleep)
+    except Exception as exc:  # noqa: BLE001
+        _job_heartbeat(conn, run_id, ca.JOB, "error", {"step": "fetch", "error": describe(exc)})
+        print(f"WARNING: corporate actions fetch failed: {describe(exc)}", file=sys.stderr)
+        return
+    _job_heartbeat(conn, run_id, ca.JOB, "finished", {"step": "fetch", **counts})
+
+
+def refetch_stale(conn, clients: Clients, symbols: list[str], now: Callable[[], datetime], sleep, stats: Stats,
+                  close_of) -> list[str]:
+    """§7 rule 11 (v1.18): a stock whose stored history isn't on one split adjustment (a split
+    re-adjusted only the recent bars) is fetched again from its first stored bar. Bars whose
+    adjusted values changed get a new version with this fetch time; the rest are unchanged.
+    Returns the new fetched_at values."""
+    from data import corporate_actions as ca
+
+    out = []
+    for sym in ca.stale_symbols(conn, symbols, now()):
+        first = conn.execute("SELECT MIN(bar_date) FROM prices WHERE symbol = ?", (sym,)).fetchone()[0]
+        d = date.fromisoformat(first)
+        start = datetime(d.year, d.month, d.day, tzinfo=timezone.utc)
+        for a, b in chunk_ranges(start, now()):
+            raw, split = fetch_equity(clients, [sym], a, b, sleep)
+            rows = build_rows(raw, split, {}, now(), stats, close_of)
+            fetched_at = db.utc_ts(now())
+            store(conn, rows, fetched_at, stats)
+            out.append(fetched_at)
+        print(f"  {sym}: history re-fetched from {first} (split adjustment changed)")
+    return out
+
+
+def _job_heartbeat(conn, run_id: str, job: str, event: str, detail: dict) -> None:
+    with conn:
+        conn.execute("INSERT INTO heartbeat (run_id, job, event, at, detail) VALUES (?, ?, ?, ?, ?)",
+                     (run_id, job, event, db.utc_ts(), json.dumps(detail, sort_keys=True, default=str)))
+
+
 def first_missing_day(conn: sqlite3.Connection, symbols: list[str]) -> datetime | None:
     """00:00 UTC of the day after the oldest of each symbol's last stored bar; None if none stored.
 
@@ -558,6 +608,10 @@ def run(conn: sqlite3.Connection, clients: Clients, days: int = 5,
             fetched_ats.append(fetched_at)
             if len(chunks) > 1:
                 print(f"  chunk {i + 1}/{len(chunks)} {a.date()}..{b.date()}: {len(rows)} closed bars")
+        if equity_symbols:
+            corporate_actions_step(conn, clients, list(equity_symbols), run_id, now, sleep)
+            refetched = refetch_stale(conn, clients, list(equity_symbols), now, sleep, stats, close_of)
+            fetched_ats += refetched
         missing = [s for s in list(equity_symbols) + list(crypto_symbols) if s not in stats.per_symbol]
         report = coverage_report(conn, clients, equity_symbols, crypto_symbols, start.date(), now(), sleep)
     except Exception as exc:  # noqa: BLE001 - every failure becomes an error heartbeat
