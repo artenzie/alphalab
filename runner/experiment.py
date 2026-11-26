@@ -37,7 +37,8 @@ SHAKEDOWN_START = date(2026, 12, 14)
 OFFICIAL_END = date(2027, 4, 2)
 SHAKEDOWN_END = date(2027, 1, 8)
 FIXED = {OFFICIAL: (OFFICIAL_START, OFFICIAL_END), SHAKEDOWN: (SHAKEDOWN_START, SHAKEDOWN_END)}
-MARKET_TABLES = ("calendar_fetches", "market_sessions", "prices", "crypto_fill_bars", "crypto_fill_windows")   # FK order
+MARKET_TABLES = ("calendar_fetches", "market_sessions", "prices", "crypto_fill_bars", "crypto_fill_windows",
+                 "corporate_actions")   # FK order
 
 
 class ExperimentError(Exception):

@@ -110,6 +110,16 @@ def populated(conn):
     aid = conn.execute("INSERT INTO alerts (key, event, title, body, priority, created_at) "
                        "VALUES ('tick', 'open', 't', 'b', 4, '2026-12-14T23:00:00.000Z')").lastrowid
     conn.execute("INSERT INTO alert_sends (alert_id, sent_at) VALUES (?, '2026-12-14T23:00:01.000Z')", (aid,))
+    conn.execute("""INSERT INTO corporate_actions (ca_key, ca_type, symbol, ex_date, old_rate, new_rate, raw, fetched_at)
+                    VALUES ('forward_split|NVDA|2026-12-15', 'forward_split', 'NVDA', '2026-12-15', 1, 4, '{}',
+                            '2026-12-14T22:30:00.000Z')""")
+    se = conn.execute("""INSERT INTO symbol_events (symbol, ex_date, event, ratio, reason, source, decided_at)
+                         VALUES ('NVDA', '2026-12-15', 'split', 4, 'confirmed', 'auto',
+                                 '2026-12-15T22:31:00.000Z')""").lastrowid
+    conn.execute("""INSERT INTO split_events (agent_id, symbol, ex_date, applied_on, symbol_event_id, ratio,
+                        qty_before, qty_after, avg_cost_before, avg_cost_after, applied_at)
+                    VALUES ('8', 'NVDA', '2026-12-15', '2026-12-15', ?, 4, 10, 40, 800, 200,
+                            '2026-12-15T22:32:00.000Z')""", (se,))
     conn.commit()
     return conn
 

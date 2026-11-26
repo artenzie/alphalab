@@ -28,6 +28,9 @@ def source(tmp_path):
     with c:
         add_fill_bar(c)
         add_fill_window(c)
+        c.execute("""INSERT INTO corporate_actions (ca_key, ca_type, symbol, ex_date, old_rate, new_rate, raw,
+                     fetched_at) VALUES ('forward_split|NVDA|2026-12-15', 'forward_split', 'NVDA', '2026-12-15',
+                     1, 4, '{}', '2026-11-16T22:30:00.000Z')""")
     c.close()
     return path
 

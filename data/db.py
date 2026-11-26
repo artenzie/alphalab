@@ -39,6 +39,9 @@ APPEND_ONLY_TABLES = (
     "experiment",
     "alerts",
     "alert_sends",
+    "corporate_actions",
+    "symbol_events",
+    "split_events",
 )
 ALL_TABLES = ("agents",) + APPEND_ONLY_TABLES
 

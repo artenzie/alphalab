@@ -446,6 +446,74 @@ CREATE TABLE IF NOT EXISTS alert_sends (
 CREATE UNIQUE INDEX IF NOT EXISTS ux_alert_sends ON alert_sends (alert_id);
 
 -- ---------------------------------------------------------------------------
+-- corporate_actions: Alpaca corporate actions as fetched (§7 rule 11, v1.18)
+-- ---------------------------------------------------------------------------
+-- Fetched at every equity ingest for the 22 stocks and SPY (every type except
+-- cash dividends, which §7 ignores), versioned like prices: a new row only when
+-- an action's content differs from its latest stored version. ca_key names the
+-- action across fetches (type|symbol|ex_date). Never in a snapshot.
+CREATE TABLE IF NOT EXISTS corporate_actions (
+    ca_id        INTEGER PRIMARY KEY,
+    ca_key       TEXT NOT NULL,
+    ca_type      TEXT NOT NULL,                     -- 'forward_split', 'reverse_split', 'spin_off', ...
+    symbol       TEXT NOT NULL,                     -- the universe stock it concerns
+    ex_date      TEXT NOT NULL CHECK (ex_date GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]'),  -- ex_date, or effective_date for mergers
+    old_rate     REAL,
+    new_rate     REAL,
+    raw          TEXT NOT NULL CHECK (json_valid(raw)),
+    fetched_at   TEXT NOT NULL CHECK (fetched_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9]Z'),
+    UNIQUE (ca_key, fetched_at)
+);
+CREATE INDEX IF NOT EXISTS ix_corporate_actions ON corporate_actions (symbol, ex_date);
+
+-- ---------------------------------------------------------------------------
+-- symbol_events: the verdict per stock and ex-date (v1.18)
+-- ---------------------------------------------------------------------------
+-- The latest row per (symbol, ex_date) decides: 'split' = apply ratio, 'freeze' =
+-- the stock is frozen (held at its last close, orders cancelled or rejected),
+-- 'unfreeze' = lifted with nothing to apply. A resolution is a new row that
+-- references the freeze it ends (corrects_id); source 'manual' for a person.
+CREATE TABLE IF NOT EXISTS symbol_events (
+    symbol_event_id      INTEGER PRIMARY KEY,
+    symbol               TEXT NOT NULL,
+    ex_date              TEXT NOT NULL CHECK (ex_date GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]'),
+    event                TEXT NOT NULL CHECK (event IN ('split', 'freeze', 'unfreeze')),
+    ratio                REAL CHECK (ratio IS NULL OR ratio > 0),
+    reason               TEXT NOT NULL,
+    corporate_action_ids TEXT CHECK (corporate_action_ids IS NULL OR json_valid(corporate_action_ids)),
+    source               TEXT NOT NULL CHECK (source IN ('auto', 'manual')),
+    decided_at           TEXT NOT NULL CHECK (decided_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9]Z'),
+    corrects_id          INTEGER REFERENCES symbol_events(symbol_event_id),
+    CHECK (event <> 'split' OR ratio IS NOT NULL)
+);
+CREATE INDEX IF NOT EXISTS ix_symbol_events ON symbol_events (symbol, ex_date, symbol_event_id);
+
+-- ---------------------------------------------------------------------------
+-- split_events: one per agent and applied split (v1.18)
+-- ---------------------------------------------------------------------------
+-- Written by settle_day in the same transaction as that day's fills: shares and
+-- average cost before and after, and in detail each pending order restated in
+-- post-split shares (order_id, qty before and after, rounding).
+CREATE TABLE IF NOT EXISTS split_events (
+    split_event_id   INTEGER PRIMARY KEY,
+    agent_id         TEXT NOT NULL REFERENCES agents(agent_id),
+    symbol           TEXT NOT NULL,
+    ex_date          TEXT NOT NULL CHECK (ex_date GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]'),
+    applied_on       TEXT NOT NULL CHECK (applied_on GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]'),   -- the settle day (ex_date, or later after a freeze)
+    symbol_event_id  INTEGER NOT NULL REFERENCES symbol_events(symbol_event_id),
+    ratio            REAL NOT NULL CHECK (ratio > 0),
+    qty_before       REAL NOT NULL,
+    qty_after        REAL NOT NULL,
+    avg_cost_before  REAL,
+    avg_cost_after   REAL,
+    detail           TEXT CHECK (detail IS NULL OR json_valid(detail)),
+    applied_at       TEXT NOT NULL CHECK (applied_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9]Z'),
+    corrects_id      INTEGER REFERENCES split_events(split_event_id)
+);
+CREATE UNIQUE INDEX IF NOT EXISTS ux_split_events
+    ON split_events (agent_id, symbol, ex_date) WHERE corrects_id IS NULL;
+
+-- ---------------------------------------------------------------------------
 -- Integrity triggers
 -- ---------------------------------------------------------------------------
 
@@ -511,3 +579,9 @@ CREATE TRIGGER IF NOT EXISTS alerts_no_update      BEFORE UPDATE ON alerts      
 CREATE TRIGGER IF NOT EXISTS alerts_no_delete      BEFORE DELETE ON alerts      BEGIN SELECT RAISE(ABORT, 'alerts is append-only (CLAUDE.md rule 2)'); END;
 CREATE TRIGGER IF NOT EXISTS alert_sends_no_update BEFORE UPDATE ON alert_sends BEGIN SELECT RAISE(ABORT, 'alert_sends is append-only (CLAUDE.md rule 2)'); END;
 CREATE TRIGGER IF NOT EXISTS alert_sends_no_delete BEFORE DELETE ON alert_sends BEGIN SELECT RAISE(ABORT, 'alert_sends is append-only (CLAUDE.md rule 2)'); END;
+CREATE TRIGGER IF NOT EXISTS corporate_actions_no_update BEFORE UPDATE ON corporate_actions BEGIN SELECT RAISE(ABORT, 'corporate_actions is append-only (CLAUDE.md rule 2)'); END;
+CREATE TRIGGER IF NOT EXISTS corporate_actions_no_delete BEFORE DELETE ON corporate_actions BEGIN SELECT RAISE(ABORT, 'corporate_actions is append-only (CLAUDE.md rule 2)'); END;
+CREATE TRIGGER IF NOT EXISTS symbol_events_no_update BEFORE UPDATE ON symbol_events BEGIN SELECT RAISE(ABORT, 'symbol_events is append-only (CLAUDE.md rule 2)'); END;
+CREATE TRIGGER IF NOT EXISTS symbol_events_no_delete BEFORE DELETE ON symbol_events BEGIN SELECT RAISE(ABORT, 'symbol_events is append-only (CLAUDE.md rule 2)'); END;
+CREATE TRIGGER IF NOT EXISTS split_events_no_update BEFORE UPDATE ON split_events BEGIN SELECT RAISE(ABORT, 'split_events is append-only (CLAUDE.md rule 2)'); END;
+CREATE TRIGGER IF NOT EXISTS split_events_no_delete BEFORE DELETE ON split_events BEGIN SELECT RAISE(ABORT, 'split_events is append-only (CLAUDE.md rule 2)'); END;
