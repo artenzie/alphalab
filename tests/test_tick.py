@@ -146,14 +146,13 @@ def test_retry_cap_three_attempts_then_one_settle_only_run(world, monkeypatch):
     calls = world.calls()
     assert max(calls.values()) == 3 and all(v <= 3 for v in calls.values())    # at most 3 rounds of calls
     assert calls["8"] == 3
-    # past the deadline: one settle-only run, no AI call, then the day is left alone
+    # past the deadline: a settle-only run, no AI call; it finishes missed, then the day is final
     r = world.tick(deadline + timedelta(minutes=5))
     eq = [x for x in r.ran if x["asset_class"] == "us_equity"]
-    assert [(x["kind"], x["attempt"]) for x in eq] == [("settle_only", 4)]
+    assert [(x["kind"], x["attempt"], x["status"]) for x in eq] == [("settle_only", 4, "missed")]
     assert world.calls() == calls
     r = world.tick(deadline + timedelta(minutes=10))
     assert not [x for x in r.ran if x["asset_class"] == "us_equity" and x["date"] == START.isoformat()]
-    assert any(s["why"] == "gap: past the deadline" and s["date"] == START.isoformat() for s in r.skipped)
     assert started(conn_path, "us_equity", START) == 4
     c = db.connect(conn_path)
     assert c.execute("SELECT COUNT(*) FROM equity WHERE as_of_date = ?", (START.isoformat(),)).fetchone()[0] > 0

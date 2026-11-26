@@ -10,13 +10,20 @@ those names, and a tick refuses --no-ai on any label but dev.
 
 A day is due, per asset class, when it is in the run (start <= day <= end; an NYSE session for
 equity, every calendar day for crypto), its protocol fetch time has passed (data/calendar.py, all
-UTC, so clock changes and early closes need no config) and it has no daily_run that finished
-with status ok. Then, counting daily_run starts (not ticks):
+UTC, so clock changes and early closes need no config) and it is not final: no daily_run finished
+with status ok or missed. Then, counting daily_run starts (not ticks):
   * before the day's decision deadline (v1.13): at most MAX_ATTEMPTS starts. An on-time or late
     run; each restart-safe (stored decisions are never called again, placed orders skipped).
-  * after the deadline: one settle-only run (run_day settles, marks and runs the margin check;
-    nobody decides), then the day is left alone and runner.status shows it as a gap.
-Due days run oldest first, so a Pi that was down catches up with no holes in the ledger.
+  * after the deadline: a settle-only run (run_day settles, marks and runs the margin check on the
+    protocol schedule, v1.17; nobody decides) on every tick until one finishes 'missed' (every
+    agent marked and margin-checked). runner.status shows the day as missed.
+Due days run oldest first, and a day that ends with an agent unmarked holds back the later days
+of its asset class until a later tick marks it, so a Pi that was down catches up with no holes in
+the ledger (alerts raise error:<ac>:<date> if it keeps failing).
+
+Before running anything the tick checks the network (one HTTPS request to data.alpaca.markets,
+ONLINE_TIMEOUT s, no credentials): offline (e.g. Wi-Fi not up yet after a boot) it runs nothing,
+so no attempt is used, and its heartbeat says offline.
 
 A lock (data/tick.lock) keeps two ticks apart; each run also takes runner.daily's per-asset
 lock, so a manual `runner.daily` run is never overlapped. Each tick writes one heartbeat row
@@ -46,7 +53,10 @@ from data import calendar as cal
 from data import db
 from runner import daily
 from runner import experiment as ex
+from runner import roster
 
+ONLINE_URL = "https://data.alpaca.markets/"
+ONLINE_TIMEOUT = 5                  # seconds
 MAX_ATTEMPTS = 3                    # daily_run starts per day and asset class before the deadline
 ACTIVE_NAME = "active_experiment"
 LOCK_NAME = "tick.lock"
@@ -116,14 +126,43 @@ def _starts(conn: sqlite3.Connection, asset_class: str, day: date) -> list[tuple
     return [(r[0], cal._parse_ts(r[1])) for r in rows]
 
 
-def finished_ok(conn: sqlite3.Connection, asset_class: str, day: date) -> bool:
+FINAL = ("ok", "missed")
+
+
+def finished_ok(conn: sqlite3.Connection, asset_class: str, day: date, statuses: tuple[str, ...] = ("ok",)) -> bool:
     ids = [r for r, _ in _starts(conn, asset_class, day)]
     if not ids:
         return False
     names = ", ".join("?" * len(ids))
     return conn.execute(
         f"""SELECT 1 FROM heartbeat WHERE job = ? AND event = 'finished' AND run_id IN ({names})
-              AND json_extract(detail, '$.status') = 'ok' LIMIT 1""", (daily.JOB, *ids)).fetchone() is not None
+              AND json_extract(detail, '$.status') IN ({", ".join("?" * len(statuses))}) LIMIT 1""",
+        (daily.JOB, *ids, *statuses)).fetchone() is not None
+
+
+def is_final(conn: sqlite3.Connection, asset_class: str, day: date) -> bool:
+    """A run finished ok, or past the deadline finished missed (held, every agent marked)."""
+    return finished_ok(conn, asset_class, day, FINAL)
+
+
+def marked(conn: sqlite3.Connection, agent_ids, day: date) -> bool:
+    """Every one of these agents has its mark (an equity row) for the day."""
+    ids = list(agent_ids)
+    if not ids:
+        return True
+    n = conn.execute(f"SELECT COUNT(DISTINCT agent_id) FROM equity WHERE as_of_date = ? AND agent_id IN "
+                     f"({', '.join('?' * len(ids))})", (day.isoformat(), *ids)).fetchone()[0]
+    return n == len(set(ids))
+
+
+def online(session: Any = None, url: str = ONLINE_URL, timeout: float = ONLINE_TIMEOUT) -> bool:
+    """One HTTPS request (no credentials): any HTTP response means the network and TLS work."""
+    import requests
+    try:
+        (session or requests).get(url, timeout=timeout)
+        return True
+    except Exception:  # noqa: BLE001 - offline, DNS, TLS, timeout: all the same here
+        return False
 
 
 def run_days(conn, asset_class: str, start: date, end: date, now: datetime, trading: Any = None) -> list[date]:
@@ -153,7 +192,7 @@ def due(conn, exp: ex.Experiment, now: datetime, trading: Any = None) -> tuple[l
     end = exp.end_date or exp.start_date
     for ac in ASSETS:
         for d in run_days(conn, ac, exp.start_date, end, now, trading):
-            if finished_ok(conn, ac, d):
+            if is_final(conn, ac, d):
                 continue
             deadline = cal.decision_deadline(ac, d, conn, trading)
             starts = [t for _, t in _starts(conn, ac, d)]
@@ -165,11 +204,8 @@ def due(conn, exp: ex.Experiment, now: datetime, trading: Any = None) -> tuple[l
                 else:
                     skipped.append({"asset_class": ac, "date": d.isoformat(), "why": "attempts used",
                                     "attempts": len(before)})
-            elif not after:
+            else:                              # every tick until it finishes missed (v1.17)
                 todo.append(Due(ac, d, "settle_only", len(starts) + 1))
-            else:
-                skipped.append({"asset_class": ac, "date": d.isoformat(), "why": "gap: past the deadline",
-                                "attempts": len(starts)})
     return todo, skipped
 
 
@@ -179,7 +215,7 @@ def due(conn, exp: ex.Experiment, now: datetime, trading: Any = None) -> tuple[l
 
 @dataclass
 class TickResult:
-    status: str                              # 'idle' (nothing active) | 'busy' | 'ok' | 'error'
+    status: str                              # 'idle' (nothing active) | 'busy' | 'offline' | 'ok' | 'error'
     ran: list[dict] = field(default_factory=list)
     skipped: list[dict] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
@@ -197,7 +233,7 @@ def _tick_heartbeat(conn, run_id: str, now: datetime, detail: dict) -> None:
 
 
 def run_tick(data_dir: Path, now: Callable[[], datetime], make_deps: Callable[[], daily.Deps],
-             trading: Any = None) -> TickResult:
+             trading: Any = None, is_online: Callable[[], bool] | None = None) -> TickResult:
     lock = open(data_dir / LOCK_NAME, "w")
     try:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -205,12 +241,12 @@ def run_tick(data_dir: Path, now: Callable[[], datetime], make_deps: Callable[[]
         lock.close()
         return TickResult("busy")
     try:
-        return _tick(data_dir, now, make_deps, trading)
+        return _tick(data_dir, now, make_deps, trading, is_online)
     finally:
         lock.close()
 
 
-def _tick(data_dir, now, make_deps, trading) -> TickResult:
+def _tick(data_dir, now, make_deps, trading, is_online=None) -> TickResult:
     t0 = now()                                   # the tick's heartbeat is stamped at its start
     active = read_active(data_dir)
     if active is None:
@@ -228,8 +264,17 @@ def _tick(data_dir, now, make_deps, trading) -> TickResult:
         if active.no_ai and exp.name != DEV:
             raise TickError(f"--no-ai is only allowed on a dev label, not {exp.name!r}")
         todo, res.skipped = due(conn, exp, t0, trading)
+        if todo and is_online is not None and not is_online():
+            res.status = "offline"
+            res.skipped += [{"asset_class": j.asset_class, "date": j.day.isoformat(), "why": "offline"} for j in todo]
+            todo = []
         deps = make_deps() if todo else None
+        waiting: dict[str, date] = {}            # asset class -> the earlier day still missing marks
         for job in todo:
+            if job.asset_class in waiting:
+                res.skipped.append({"asset_class": job.asset_class, "date": job.day.isoformat(),
+                                    "why": f"waits for {waiting[job.asset_class]}'s marks"})
+                continue
             try:
                 held = daily.lock(path, job.asset_class)
             except daily.RunLocked as e:
@@ -246,6 +291,9 @@ def _tick(data_dir, now, make_deps, trading) -> TickResult:
                      "attempt": job.attempt, "status": None if rep is None else rep.status,
                      "late": None if rep is None else rep.late}
             res.ran.append(entry)
+            ids = roster.rule_ids(job.asset_class) + (() if active.no_ai else roster.ai_ids(job.asset_class))
+            if rep is None or not marked(conn, ids, job.day):
+                waiting[job.asset_class] = job.day
             if rep is not None:
                 print(daily.format_report(rep))
                 if rep.status == "error":
@@ -299,7 +347,7 @@ def main(argv: list[str] | None = None) -> int:
         t0 = clock()
         with alerts.Pinger():                    # healthchecks.io: alive, also during a 3-hour tick
             try:
-                res = run_tick(data_dir, clock, daily.real_deps)
+                res = run_tick(data_dir, clock, daily.real_deps, is_online=online)
             finally:
                 after_tick_alerts(data_dir, t0, clock)
     except (TickError, ex.ExperimentError) as e:
