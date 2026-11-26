@@ -14,7 +14,8 @@ AlphaLab is a research project that runs AI trading agents against Alpaca **pape
 | `research/decisions.md`, `research/logs/` | Design decisions (D1, D2, …) and dated learning logs |
 | `research/universe/` | Frozen universe (`universe.csv`) + holdings evidence |
 | `data/db.py` | SQLite schema setup (`schema.sql`) and connections; append-only triggers |
-| `data/ingest.py` | Daily Alpaca bars into versioned `prices` rows; never stores unclosed bars |
+| `data/ingest.py` | Daily Alpaca bars into versioned `prices` rows; never stores unclosed bars; corporate actions at every ingest, and a stock's whole history again after a split (v1.18) |
+| `data/corporate_actions.py` | §7 rule 11 (v1.18): Alpaca corporate actions (versioned, never in a snapshot), `review` (split confirmed by the price step, or freeze), frozen stocks and their marks; `python -m data.corporate_actions show\|resolve` |
 | `data/fill_prices.py` | Crypto 1-minute fill bars for the hour [t_ref, t_ref+60 min) after each day's crypto decision time into `crypto_fill_bars`, plus `crypto_fill_windows` once the hour is fetched in full; closed bars only, never in a snapshot |
 | `data/calendar.py` | NYSE trading days, closes, daily run times (all UTC) |
 | `data/checks.py` | Data checks on stored bars, run after every ingest |
@@ -24,7 +25,7 @@ AlphaLab is a research project that runs AI trading agents against Alpaca **pape
 | `strategies/benchmark.py` … | Agents 1-6: benchmark, equal_weight, momentum, mean_reversion, trend, long_short; `bitcoin.py` is C0 (§13) |
 | `execution/risk.py` | §6 risk checks (`apply_risk`, `margin_check`, agent 7's `apply_eligibility`), pure functions |
 | `execution/ledger.py` | §7 ledger accounting core (orders, fills, accruals, marks, margin, delisting), pure functions |
-| `execution/ledger_db.py` | Ledger on the append-only tables: `settle_day` (fill at open, or crypto at the first 1-min bar after the decision; accrue, mark), `place_orders` |
+| `execution/ledger_db.py` | Ledger on the append-only tables: `settle_day` (splits applied before the fills, frozen stocks held; fill at open, or crypto at the first 1-min bar after the decision; accrue, mark), `place_orders` (rejects orders in frozen stocks) |
 | `scripts/` | One-off tools: build_universe, OpenRouter model checks (`test_pinned`, `smoke_ai`), backtest_indicators/risk/ledger. Never collected by pytest (`pytest.ini`) |
 | `tests/` | pytest suite |
 | `agents/harness.py` | `AIAgent`: same `decide` interface; prompt (template + output spec + JSON input incl. `run`, `eligible` for agent 7, `strategies`/`allocation` for agent 13), JSON validation (agent 13: `parse_allocation`, book = `blend`), §8 retries, call record per attempt; crypto spec for C1 |
@@ -32,14 +33,14 @@ AlphaLab is a research project that runs AI trading agents against Alpaca **pape
 | `agents/llm.py` | `LLMClient` interface, `FakeClient` for tests |
 | `agents/models.py` | Frozen §8 model lineup as data (agent → model, endpoints, reasoning, temperature) |
 | `agents/openrouter.py` | `OpenRouterClient`: pinned endpoints, no fallbacks, error mapping, key never logged |
-| `runner/daily.py` | `python -m runner.daily equity\|crypto --experiment NAME [--date D]`: one trading day in protocol order (ingest → settle → snapshot → decide → risk → orders), restart-safe, heartbeat per step, late runs (v1.13) |
+| `runner/daily.py` | `python -m runner.daily equity\|crypto --experiment NAME [--date D]`: one trading day in protocol order (ingest → corporate-actions review → settle → snapshot → decide → risk → orders), restart-safe, heartbeat per step, late runs (v1.13) |
 | `runner/experiment.py`, `runner/roster.py` | One DB file per experiment (`data/<name>.db`, labelled with start and end date; `create --start --end` copies market data, empty ledger); which agents run (all of them) and how they're built; `runner/blender.py`: agent 13's strategy inputs from marks up to the decision date |
 | `runner/tick.py`, `runner/status.py` | `python -m runner.tick`: runs whatever is due for the experiment named in `data/active_experiment` (gitignored; `<name> [--no-ai]`, --no-ai on dev only), max 3 attempts per day before the deadline then one settle-only run; `python -m runner.status`: last runs, outcomes, uptime (D2), tick gaps |
-| `runner/alerts.py` | Phone alerts via ntfy.sh (`NTFY_TOPIC`): run errors, missed days, tick failures (open/resolved once each), daily equity summary, OpenRouter spend 80% and credit < $5; queue in the append-only `alerts`/`alert_sends` tables, sent after each tick, never failing it; healthchecks.io ping (`HEALTHCHECKS_URL`) during every tick; `python -m runner.alerts test` |
+| `runner/alerts.py` | Phone alerts via ntfy.sh (`NTFY_TOPIC`): run errors, missed days, tick failures, frozen stocks (open/resolved once each), daily equity summary, OpenRouter spend 80% and credit < $5; queue in the append-only `alerts`/`alert_sends` tables, sent after each tick, never failing it; healthchecks.io ping (`HEALTHCHECKS_URL`) during every tick; `python -m runner.alerts test` |
 | `runner/backup.py` | Nightly backup files (online backup, integrity_check, gzip, manifest) and the restore drill (`drill --to DIR`) |
 | `deploy/` | systemd units: 5-minute timer for runner.tick, 02:30 UTC timer for `backup.sh` (rclone to `gdrive:alphalab-backups`, 30 days), `alphalab-status.service` (the status page, Restart=always); `sudo deploy/install.sh` installs all three |
 | `analysis/results.py` | Results report per agent from an experiment DB: returns, late and missed days, `--exclude-late`, herding (headline 8-12, supplementary 7-12/14/15, never 13) (§10) |
-| `dashboard/status_page.py` | Plain read-only status page (`python -m dashboard.status_page`): binds to the tailscale0 IPv4 only, port 8080, never 0.0.0.0; DB opened mode=ro per request, cached calendar only; shows runner.status plus equity and return since start, last decision per AI agent, AI cost today and month to date (from the DB), last backup, open alerts; standard library only |
+| `dashboard/status_page.py` | Plain read-only status page (`python -m dashboard.status_page`): binds to the tailscale0 IPv4 only, port 8080, never 0.0.0.0; DB opened mode=ro per request, cached calendar only; shows runner.status plus equity and return since start, last decision per AI agent, AI cost today and month to date (from the DB), last backup, open alerts, frozen stocks; standard library only |
 
 ## Working here
 

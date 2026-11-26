@@ -23,11 +23,17 @@ is raised and nothing is written. Delisted stocks must be passed in `delisted`
 pending orders are cancelled.
 
 Modes:
-  live      raw open/close (real shares, as in the Alpaca mirrors). If the
-            previous session's bar of a symbol held or ordered now has
-            adj/raw != 1, a split happened in between: SplitDetected stops the
-            ledger for a manual correction (rule 11) rather than sizing across it.
-  backtest  split-adjusted open/close, matching backtest snapshots; no split guard.
+  live      raw open/close (real shares, as in the Alpaca mirrors). Splits (rule 11,
+            v1.18): the runner's corporate-actions review (data/corporate_actions.py)
+            writes a verdict per stock and ex-date before any settle. A 'split' an
+            agent hasn't passed is applied before the fills (shares x ratio, avg cost
+            / ratio, pending orders restated in post-split shares, a split_events row
+            per agent, holding or not). A frozen stock is held at its last close
+            before the event (book_closes), its pending orders are cancelled
+            ('symbol_frozen') and place_orders rejects new orders in it. A price step
+            (previous bar adj/raw != 1) with no verdict at all raises SplitDetected:
+            the review hasn't run.
+  backtest  split-adjusted open/close, matching backtest snapshots; no split handling.
 
 Crypto (C0, C1; §7 rule 4, v1.13). Every calendar day is a settle day: day
 D+1 fills decision D's orders and marks at D+1's daily close (00:00Z on D+2).
