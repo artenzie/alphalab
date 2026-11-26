@@ -172,13 +172,7 @@ def round_long(qty: float) -> float:
 
 def target_shares(weight: float, pv: float, close: float) -> float:
     """Rule 1 + 3: shares for a weight, longs down to 9 dp, shorts towards zero to whole shares."""
-    raw = weight * pv / close
-    if raw > 0:
-        return round_long(raw)
-    if raw < 0:
-        nearest = round(raw)
-        return float(nearest if abs(raw - nearest) < SHORT_SNAP else math.trunc(raw))
-    return 0.0
+    return _round_target(weight * pv / close)
 
 
 def _q(x: float) -> float:
@@ -291,6 +285,79 @@ def cash_floor(account: Account, orders: list[Order], ref_prices: Mapping[str, f
             "applied_weight": None if o.target_weight is None else (0.0 if cancel else o.target_weight * k),
             "detail": json.dumps(detail, sort_keys=True)})
     return plan, events
+
+
+# ---------------------------------------------------------------------------
+# Splits (rule 11, v1.18)
+# ---------------------------------------------------------------------------
+
+def apply_split(account: Account, symbol: str, ratio: float) -> tuple[Account, Position | None, Position | None]:
+    """Shares x ratio and average cost / ratio, exactly; cash and everything else unchanged.
+
+    A reverse split can leave a fractional short (the one exception to whole-share shorts);
+    rule 3 rounding brings it back to whole shares at the agent's next trade in the stock.
+    Returns (account, position before, position after); (account, None, None) if not held.
+    """
+    if not (isinstance(ratio, (int, float)) and math.isfinite(ratio) and ratio > 0):
+        raise LedgerError(f"split ratio must be a positive number, got {ratio!r}")
+    old = account.positions.get(symbol)
+    if old is None:
+        return account, None, None
+    new = Position(old.qty * ratio, old.avg_cost / ratio)
+    pos = dict(account.positions)
+    pos[symbol] = new
+    return replace(account, positions=pos), old, new
+
+
+def _round_target(qty: float) -> float:
+    """Rule 3 on a share target: longs down to 9 dp, shorts towards zero to whole shares."""
+    if qty > 0:
+        return round_long(qty)
+    if qty < 0:
+        nearest = round(qty)
+        return float(nearest if abs(qty - nearest) < SHORT_SNAP else math.trunc(qty))
+    return 0.0
+
+
+def restate_orders(pos_before: float, orders: list[Order], ratio: float) -> list[dict]:
+    """Pending orders in one stock, sized before a split, restated in post-split shares.
+
+    The orders' target (pos_before + their signed quantities) x ratio, rounded as in rule 3,
+    minus the post-split holding (pos_before x ratio). One order: the difference, on its own
+    side. A flip (close, then open): the close leg is the whole post-split holding, the open
+    leg the rounded target. An order restated to nothing, or one whose restated difference
+    would be on the other side (the rounding of a short target towards zero can do that), is
+    cancelled. Returns one dict per order, in order: qty_before, qty_after (None = cancelled),
+    target_before, target_after_exact, target_after, rounding (shares dropped by rule 3).
+    The $100 minimum is not applied again.
+    """
+    if not orders:
+        return []
+    if len({o.symbol for o in orders}) != 1:
+        raise LedgerError("restate_orders takes the orders of one stock")
+    tgt_pre = _q(pos_before + math.fsum(o.signed_qty for o in orders))
+    exact = tgt_pre * ratio
+    tgt = _round_target(exact)
+    post = pos_before * ratio
+    base = {"target_before": tgt_pre, "target_after_exact": exact, "target_after": tgt,
+            "rounding": exact - tgt, "ratio": ratio}
+    out = []
+    if len(orders) == 1:
+        o = orders[0]
+        delta = _q(tgt - post)
+        same_side = delta != 0 and (delta > 0) == (o.side == "buy")
+        out.append({**base, "qty_before": o.qty, "qty_after": abs(delta) if same_side else None,
+                    **({} if same_side else {"cancelled": "restated to nothing" if delta == 0 else
+                                             "restated difference is on the other side"})})
+        return out
+    if len(orders) == 2 and pos_before != 0 and orders[0].signed_qty == -pos_before and \
+            (tgt_pre > 0) != (pos_before > 0) and tgt_pre != 0:
+        close, open_ = orders
+        out.append({**base, "qty_before": close.qty, "qty_after": abs(post)})
+        out.append({**base, "qty_before": open_.qty, "qty_after": abs(tgt) if tgt != 0 else None,
+                    **({} if tgt != 0 else {"cancelled": "restated to nothing"})})
+        return out
+    raise LedgerError(f"can't restate {len(orders)} pending orders in {orders[0].symbol} across a split")
 
 
 # ---------------------------------------------------------------------------
