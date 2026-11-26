@@ -5,7 +5,9 @@
     python -m runner.daily equity --db /tmp/dev.db --date 2026-11-18
 
 Equity day D (§3; systemd starts it at close + 1:30):
-  1. ingest D's daily bars + data checks (data/ingest.py)
+  1. ingest D's daily bars + data checks (data/ingest.py); corporate actions and, after a split,
+     the stock's history again (§7 rule 11, v1.18)
+  1b. corporate-actions review: today's verdicts (split confirmed, or the stock frozen)
   2. settle_day(D) for every agent: fill D-1's orders at D's open, accrue, mark at D's close
   3. at close + 1:45: build and store the live snapshot (hashed; data checks as of its cutoff)
   4. gate: a snapshot that failed its checks (or a run past the deadline) -> no agent decides
@@ -70,6 +72,7 @@ from typing import Any, Callable, Mapping
 
 from agents.harness import BACKOFF_S, BLEND_OF, BLENDER_ID, ELIGIBLE_AGENTS, blend
 from data import calendar as cal
+from data import corporate_actions as CA
 from data import db
 from data import snapshot as sn
 from execution import ledger as L
@@ -387,6 +390,23 @@ class _Day:
                 self.hb.errors.append("fetch_prices / data_checks: failed (see their heartbeat)")
         return self.deps.now()
 
+    def review(self) -> None:
+        """Step 1b (equity, v1.18): the corporate-actions verdicts for today, before any settle.
+        A failure is an error; settle then raises SplitDetected for a stock with an unjudged price step."""
+        if self.crypto:
+            return
+        try:
+            symbols = [r[0] for r in self.conn.execute(
+                "SELECT DISTINCT symbol FROM prices WHERE asset_class = 'us_equity' ORDER BY symbol")]
+            now = self.deps.now()
+            written = CA.review(self.conn, self.day, symbols, now)
+            frozen = sorted(CA.frozen(self.conn, self.day, now))
+        except Exception as exc:  # noqa: BLE001
+            self.hb(CA.JOB, "error", step="review", error=_err(exc))
+            self.hb.errors.append(f"{CA.JOB}: review failed: {_err(exc)}")
+            return
+        self.hb(CA.JOB, "finished", step="review", date=self.day.isoformat(), verdicts=written, frozen=frozen)
+
     def settle(self) -> set[str]:
         self.hb("settle", "started", agents=list(self.ids))
         settled = set()
@@ -405,7 +425,10 @@ class _Day:
             rep.equity = eq[0] if eq else None
             self.hb(f"settle:{aid}", "finished", agent_id=aid, status=res.status, fills=len(res.fills),
                     equity=rep.equity, cash_floor_events=len(res.floor_events),
-                    **({"cancelled": list(res.cancelled)} if res.cancelled else {}))
+                    **({"cancelled": list(res.cancelled)} if res.cancelled else {}),
+                    **({"splits": [{k: x[k] for k in ("symbol", "ex_date", "ratio", "qty_before", "qty_after")}
+                                   for x in res.splits]} if res.splits else {}),
+                    **({"frozen": list(res.frozen)} if res.frozen else {}))
         self.hb("settle", "finished", settled=sorted(settled, key=_order),
                 failed=sorted(set(self.ids) - settled, key=_order))
         return settled
@@ -479,6 +502,9 @@ class _Day:
                 acct = LD.load_account(self.conn, aid, as_of=self.day)
                 bars = LD.day_bars(self.conn, sorted(acct.positions), self.day, computed_at)
                 closes = {s: bars[s]["close"] for s in acct.positions}
+                if not self.crypto:                       # a frozen stock at its frozen mark (v1.18)
+                    closes = LD.book_closes(self.conn, self.day, closes, computed_at)
+                    closes = {s: closes[s] for s in acct.positions}
                 if late and moved_past(self.conn, aid, self.day):
                     _, mk = L.mark(acct, closes, self.day)
                     _, events = L.margin_orders(acct, mk, closes)
@@ -508,6 +534,8 @@ class _Day:
                deadline: datetime, window: tuple[datetime, datetime]) -> None:
         """Steps 5-8."""
         closes = {s: f["last_close"] for s, f in snap.payload["symbols"].items() if f["last_close"] is not None}
+        if not self.crypto:          # books value a frozen stock at its last close before the event (v1.18)
+            closes = LD.book_closes(self.conn, self.day, closes, self.deps.now())
         self.eligible = [] if self.crypto else ret63_top(snap)   # agent 7's list (v1.15), as in its prompt
         ctx0 = build_context(self.day, run_sessions(self.conn, self.ac, exp.start_date, self.day, self.deps.trading))
         todo, stored = [], []
@@ -925,6 +953,7 @@ def run_day(conn: sqlite3.Connection, asset_class: str, day: date | None = None,
 
         wait_until(times.bars_fetch_at, deps)
         data_done_at = d.data(exp, deadline)
+        d.review()
         settled = d.settle()
         snap, sid, passed = d.snapshot(times, data_done_at, deadline)
         rep.snapshot_id, rep.checks_passed = sid, passed if sid is not None else None

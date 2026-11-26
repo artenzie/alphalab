@@ -1,4 +1,4 @@
-"""Ledger database layer (protocol §7 v1.5 rules 8-11, §9): execution/ledger_db.py on a temp database.
+"""Ledger database layer (protocol §7 v1.5 rules 8-11, §9; splits v1.18 in test_split_ledger.py): execution/ledger_db.py on a temp database.
 
 No network: the calendar cache and bars are seeded by hand (helpers from
 test_snapshot). Bars are stored as the ingest stores them, fetched at close + 1:30,
@@ -202,7 +202,9 @@ def test_not_a_trading_day_refused(conn):
 # Splits, delisting, margin
 # ---------------------------------------------------------------------------
 
-def test_split_between_decision_and_fill_stops_the_ledger(conn):
+def test_price_step_without_a_verdict_is_refused(conn):
+    # v1.18: the runner reviews corporate actions before settling (tests/test_split_ledger.py);
+    # a settle called without that review must not size across an unjudged split
     buy_a_on_monday(conn)
     add(conn, "A", TUE, 110.0)
     settle(conn, "4", TUE)

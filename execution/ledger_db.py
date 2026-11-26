@@ -67,6 +67,7 @@ from datetime import date, datetime, timedelta
 from typing import Any, Mapping
 
 from data import calendar as cal
+from data import corporate_actions as ca
 from data import db
 from data.fill_prices import MINUTE, WINDOW
 from data.ingest import crypto_bar_closed, equity_bar_closed
@@ -82,7 +83,7 @@ class PriceNotAvailable(LedgerError):
 
 
 class SplitDetected(LedgerError):
-    """A split between the last close and now: the ledger stops for a manual correction."""
+    """A price step with no verdict in symbol_events: the corporate-actions review hasn't run (v1.18)."""
 
 
 @dataclass(frozen=True)
@@ -94,6 +95,8 @@ class DayResult:
     borrow: float = 0.0
     interest: float = 0.0
     floor_events: tuple[dict, ...] = ()   # rule 12 clips
+    splits: tuple[dict, ...] = ()         # rule 11 (v1.18): splits applied before the fills
+    frozen: tuple[str, ...] = ()          # rule 11 (v1.18): frozen stocks at this settle
 
 
 @dataclass(frozen=True)
@@ -253,6 +256,62 @@ def _begin(conn: sqlite3.Connection) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Splits and frozen stocks (rule 11, v1.18)
+# ---------------------------------------------------------------------------
+
+def _judged(conn: sqlite3.Connection, symbol: str, after: date, day: date, now: datetime) -> bool:
+    """symbol_events has a verdict for symbol with an ex-date in (after, day], known by now."""
+    return conn.execute("SELECT 1 FROM symbol_events WHERE symbol = ? AND ex_date > ? AND ex_date <= ? "
+                        "AND decided_at <= ? LIMIT 1",
+                        (symbol, after.isoformat(), day.isoformat(), db.utc_ts(now))).fetchone() is not None
+
+
+def _apply_splits(conn, agent_id: str, account: Account, pending: list[sqlite3.Row], day: date, now: datetime,
+                  qty_of: dict[int, float]) -> tuple[Account, list[dict], list[tuple[sqlite3.Row, dict]]]:
+    """Apply every split verdict the agent hasn't passed yet: no split_events row for it, and the
+    agent's book is still pre-split (its last mark is before the ex-date, or the stock was frozen
+    since the ex-date, so nothing in it could trade). Every such agent gets a split_events row,
+    holding or not (qty 0), so a later settle never applies the split to post-split shares.
+
+    Updates qty_of with the restated quantities; returns (account, applied splits, orders to
+    cancel with their fill detail)."""
+    out, cut = [], []
+    for v in ca.split_verdicts(conn, day, now):
+        sym, ex = v["symbol"], v["ex_date"]
+        if conn.execute("SELECT 1 FROM split_events WHERE agent_id = ? AND symbol = ? AND ex_date = ? "
+                        "AND corrects_id IS NULL", (agent_id, sym, ex)).fetchone():
+            continue
+        if account.eod_date is not None and ex <= account.eod_date.isoformat() and not ca.was_frozen(conn, sym, ex):
+            continue
+        rows = [r for r in pending if r["symbol"] == sym]
+        before = account.shares(sym)
+        restated = L.restate_orders(before, [Order(r["symbol"], r["side"], r["qty"], r["origin"], r["target_weight"])
+                                             for r in rows], v["ratio"])
+        account, p0, p1 = L.apply_split(account, sym, v["ratio"])
+        orders = []
+        for r, x in zip(rows, restated):
+            orders.append({"order_id": r["order_id"], **x})
+            if x["qty_after"] is None:
+                cut.append((r, {"reason": "split_rounding", "ratio": v["ratio"], "symbol_event_id": v["symbol_event_id"],
+                                "requested_qty": r["qty"], "restated": x}))
+            else:
+                qty_of[r["order_id"]] = x["qty_after"]
+        out.append({"symbol": sym, "ex_date": ex, "symbol_event_id": v["symbol_event_id"], "ratio": v["ratio"],
+                    "qty_before": before, "qty_after": p1.qty if p1 else 0.0,
+                    "avg_cost_before": p0.avg_cost if p0 else None, "avg_cost_after": p1.avg_cost if p1 else None,
+                    "orders": orders})
+    return account, out, cut
+
+
+def book_closes(conn: sqlite3.Connection, day: date, closes: Mapping[str, float], now: datetime) -> dict[str, float]:
+    """closes with every frozen stock at its frozen mark (its last close before the event, v1.18):
+    what the ledger values a book at while a stock is frozen."""
+    out = dict(closes)
+    out.update(ca.frozen_marks(conn, day, now))
+    return out
+
+
+# ---------------------------------------------------------------------------
 # settle_day: fills at the open, accruals, mark at the close
 # ---------------------------------------------------------------------------
 
@@ -314,9 +373,32 @@ def settle_day(conn: sqlite3.Connection, agent_id: str, day: date, now: datetime
                 account, fs = L.fill(account, d_orders, {sym: last})
                 fills_out += [(i, f, open_ts) for i, f in zip(ids, fs)]
 
+        # Rule 11 (v1.18): splits confirmed since the last settle are applied before the fills,
+        # with the pending orders restated in post-split shares; a frozen stock is held at its
+        # last close before the event and its pending orders are cancelled.
+        qty_of = {r["order_id"]: r["qty"] for r in pending}
+        split_out: list[dict] = []              # one per applied split, with its restated orders
+        frozen_marks: dict[str, float] = {}
+        if mode == "live" and not crypto:
+            account, split_out, cut = _apply_splits(conn, agent_id, account, pending, day, now, qty_of)
+            for row, why in cut:
+                _insert(conn, "fills", {"order_id": row["order_id"], "status": "cancelled", "filled_at": open_ts,
+                                        "detail": json.dumps(why, sort_keys=True)})
+                cancelled.append(row["symbol"])
+            frozen_marks = {s: m for s, m in ca.frozen_marks(conn, day, now).items()}
+            for row in pending:
+                if row["symbol"] in frozen_marks and all(row["order_id"] != c["order_id"] for c, _ in cut):
+                    _insert(conn, "fills", {"order_id": row["order_id"], "status": "cancelled", "filled_at": open_ts,
+                                            "detail": json.dumps({"reason": "symbol_frozen"})})
+                    cancelled.append(row["symbol"])
+            gone = {c["order_id"] for c, _ in cut}
+            pending = [r for r in pending if r["order_id"] not in gone and r["symbol"] not in frozen_marks]
+
         # Rule 11: every bar needed must be stored, fetched by now, and closed.
-        orders = [Order(r["symbol"], r["side"], r["qty"], r["origin"], r["target_weight"]) for r in pending]
-        needed = sorted(set(account.positions) | {o.symbol for o in orders})
+        orders = [Order(r["symbol"], r["side"], qty_of[r["order_id"]], r["origin"], r["target_weight"])
+                  for r in pending]
+        held_frozen = sorted(s for s in account.positions if s in frozen_marks)
+        needed = sorted((set(account.positions) | {o.symbol for o in orders}) - set(held_frozen))
         bars = day_bars(conn, needed, day, now)
         if crypto:
             is_closed = lambda r: crypto_bar_closed(cal._parse_ts(r["bar_ts"]), now)  # noqa: E731
@@ -329,12 +411,14 @@ def settle_day(conn: sqlite3.Connection, agent_id: str, day: date, now: datetime
                                     f"(as of {db.utc_ts(now)})")
         if mode == "live" and not crypto and account.eod_date is not None:
             prev = day_bars(conn, needed, account.eod_date, now)
-            split = [s for s, r in prev.items() if abs(r["adj_close"] / r["close"] - 1) > SPLIT_TOL]
+            split = [s for s, r in prev.items() if abs(r["adj_close"] / r["close"] - 1) > SPLIT_TOL
+                     and not _judged(conn, s, account.eod_date, day, now)]
             if split:
-                raise SplitDetected(f"split in {', '.join(split)} between {account.eod_date} and {day}: "
-                                    f"correct the positions by hand before settling")
+                raise SplitDetected(f"price step in {', '.join(split)} between {account.eod_date} and {day} "
+                                    f"with no verdict: run the corporate-actions review (data/corporate_actions.py)")
         o_key, c_key = ("open", "close") if mode == "live" else ("adj_open", "adj_close")
         closes = {s: bars[s][c_key] for s in needed}
+        closes.update({s: frozen_marks[s] for s in held_frozen})
         filled_at = {s: open_ts for s in needed}
         bar_id: dict[str, int] = {}
         if crypto:
@@ -381,6 +465,17 @@ def settle_day(conn: sqlite3.Connection, agent_id: str, day: date, now: datetime
         account, borrow, interest = L.accrue(account, day)
         account, mk = L.mark(account, closes, day)
 
+        split_id = {}                                        # order_id -> split_event_id
+        for sp in split_out:
+            sid = _insert(conn, "split_events", {
+                "agent_id": agent_id, "symbol": sp["symbol"], "ex_date": sp["ex_date"], "applied_on": day.isoformat(),
+                "symbol_event_id": sp["symbol_event_id"], "ratio": sp["ratio"], "qty_before": sp["qty_before"],
+                "qty_after": sp["qty_after"], "avg_cost_before": sp["avg_cost_before"],
+                "avg_cost_after": sp["avg_cost_after"], "applied_at": db.utc_ts(now),
+                "detail": json.dumps({"orders": sp["orders"]}, sort_keys=True)})
+            sp["split_event_id"] = sid
+            for o in sp["orders"]:
+                split_id[o["order_id"]] = (sid, o["qty_before"], sp["ratio"])
         event_id = {i: write_risk_events(conn, agent_id, [e], fill_from, pending[i]["decision_id"])[0]
                     for i, e in event_of.items()}
         for i, o in plan:
@@ -392,6 +487,10 @@ def settle_day(conn: sqlite3.Connection, agent_id: str, day: date, now: datetime
             _insert(conn, "fills", _fill_row(oid, f, at))
         for i, f in filled:
             extra = ({"risk_event_id": event_id[i], "requested_qty": pending[i]["qty"]} if i in event_id else {})
+            if pending[i]["order_id"] in split_id:
+                sid, q0, ratio = split_id[pending[i]["order_id"]]
+                extra.update(split_event_id=sid, requested_qty=q0, split_ratio=ratio,
+                             restated_qty=qty_of[pending[i]["order_id"]])
             if f.symbol in bar_id:
                 extra["fill_bar_id"] = bar_id[f.symbol]
             _insert(conn, "fills", _fill_row(pending[i]["order_id"], f, filled_at[f.symbol], extra or None))
@@ -411,7 +510,7 @@ def settle_day(conn: sqlite3.Connection, agent_id: str, day: date, now: datetime
         conn.rollback()
         raise
     return DayResult("settled", tuple(f for _, f, _ in fills_out), tuple(cancelled), mk, borrow, interest,
-                     tuple(floor_events))
+                     tuple(floor_events), tuple(split_out), tuple(sorted(frozen_marks)))
 
 
 # ---------------------------------------------------------------------------
@@ -442,6 +541,10 @@ def place_orders(conn: sqlite3.Connection, agent_id: str, day: date, closes: Map
         account = load_account(conn, agent_id, as_of=day)
         if account.eod_date != day:
             raise LedgerError(f"agent {agent_id} isn't settled for {day} (last close {account.eod_date})")
+        frozen = {}
+        if _asset_class(conn, agent_id) == "us_equity":
+            frozen = ca.frozen_marks(conn, day, computed_at or created_at)       # rule 11 (v1.18)
+            closes = {**closes, **{s: m for s, m in frozen.items() if s in closes or s in account.positions}}
         _, mk = L.mark(account, closes, day)
         m_orders, m_events = L.margin_orders(account, mk, closes)
         superseded = bool(m_events) and targets is not None
@@ -456,6 +559,15 @@ def place_orders(conn: sqlite3.Connection, agent_id: str, day: date, closes: Map
             orders = L.plan_orders(account, targets, closes, origin="decision")
         else:
             orders = m_orders
+        dropped = [o for o in orders if o.symbol in frozen]
+        if dropped:          # a frozen stock: no new orders in it (rule 11, v1.18), each one logged
+            write_risk_events(conn, agent_id, [{
+                "event_type": "reject", "rule": "symbol_frozen", "symbol": o.symbol,
+                "requested_weight": o.target_weight, "applied_weight": None,
+                "detail": json.dumps({"side": o.side, "qty": o.qty, "origin": o.origin,
+                                      "held_at": frozen[o.symbol]}, sort_keys=True)} for o in dropped],
+                created_at, decision_id if targets is not None else None)
+            orders = [o for o in orders if o.symbol not in frozen]
         ids = write_orders(conn, agent_id, _asset_class(conn, agent_id), orders, created_at, decision_id,
                            {e["symbol"]: i for e, i in zip(m_events, ev_ids)})
         conn.commit()

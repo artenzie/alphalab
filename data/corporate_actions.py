@@ -4,7 +4,7 @@
     ca.fetch(conn, client, symbols, now, sleep)        # every equity ingest: Alpaca -> corporate_actions
     ca.stale_symbols(conn, symbols, now)               # stocks whose stored history isn't on the current adjustment
     ca.review(conn, day, symbols, now)                 # runner, after ingest and before settle: symbol_events
-    ca.split_verdicts(conn, day, after, now)           # ledger: splits to apply at this settle
+    ca.split_verdicts(conn, day, now)                  # ledger: split verdicts up to day
     ca.frozen(conn, day, now)                          # ledger, runner, status: open freezes
 
     python -m data.corporate_actions show --experiment dev
@@ -326,11 +326,15 @@ def frozen_marks(conn: sqlite3.Connection, day: date, now: datetime) -> dict[str
     return {s: frozen_mark(conn, s, e["ex_date"], now) for s, e in frozen(conn, day, now).items()}
 
 
-def split_verdicts(conn: sqlite3.Connection, day: date, after: str, now: datetime) -> list[sqlite3.Row]:
-    """Splits to apply at a settle: the latest row per (symbol, ex_date) is 'split', its ex-date is
-    on or before day, and it was decided after `after` (the agent's previous settle) and by now."""
-    return [e for e in _latest_events(conn, now)
-            if e["event"] == "split" and e["ex_date"] <= day.isoformat() and e["decided_at"] > after]
+def split_verdicts(conn: sqlite3.Connection, day: date, now: datetime) -> list[sqlite3.Row]:
+    """Every (symbol, ex_date) whose latest verdict, known by now, is 'split', ex-date on or before day.
+    The ledger decides per agent which it hasn't passed yet (execution/ledger_db.py)."""
+    return [e for e in _latest_events(conn, now) if e["event"] == "split" and e["ex_date"] <= day.isoformat()]
+
+
+def was_frozen(conn: sqlite3.Connection, symbol: str, ex_date: str) -> bool:
+    return conn.execute("SELECT 1 FROM symbol_events WHERE symbol = ? AND ex_date = ? AND event = 'freeze' LIMIT 1",
+                        (symbol, ex_date)).fetchone() is not None
 
 
 def resolve(conn: sqlite3.Connection, symbol: str, ex_date: str, now: datetime, ratio: float | None,
