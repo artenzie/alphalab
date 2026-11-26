@@ -440,11 +440,18 @@ def test_a_run_past_the_deadline_decides_nothing(conn, clients):
     deadline = cal.decision_deadline("us_equity", DAYS[0], conn)
     assert deadline == cal.session(DAYS[1], conn).open - timedelta(hours=1)
     r, _ = equity_run(conn, DAYS[0], clients, at=deadline + timedelta(minutes=1))
-    assert not r.decided and r.exit_code == 1
+    # a hold by protocol (§3): missed, not an error (v1.17)
+    assert not r.decided and r.status == "missed" and r.exit_code == 0 and r.errors == []
     assert counts(conn)["decisions"] == 0 and counts(conn)["orders"] == 0 and n_calls(clients) == 0
     assert {x[0] for x in conn.execute("SELECT agent_id FROM equity")} == set(EQUITY_IDS)   # still marked
-    assert any(j in ("build_snapshot", "decide") and e == "error" and "deadline" in d["reason"]
-               for j, e, d in heartbeat(conn, r.run_id))
+    hb = heartbeat(conn, r.run_id)
+    assert not [j for j, e, _ in hb if e == "error"]
+    assert any(j == "build_snapshot" and e == "finished" and "deadline" in d["skipped"] for j, e, d in hb)
+    assert any(j == "decide" and e == "finished" and d.get("missed") for j, e, d in hb)
+    # the margin check still ran for every agent, stamped on the protocol schedule
+    checked = {d["agent_id"]: d for j, e, d in hb if j.startswith("place_orders:") and e == "finished"}
+    assert set(checked) == set(EQUITY_IDS) and all(d["hold"] for d in checked.values())
+    assert {d["created_at"] for d in checked.values()} == {db.utc_ts(cal.equity_times(DAYS[0], conn).decide_at)}
 
 
 def test_agents_finishing_after_the_deadline_are_not_recorded(conn):
@@ -589,8 +596,9 @@ def test_crypto_past_the_deadline_decides_nothing_but_settles(conn, clients):
     d2 = START + timedelta(days=1)
     assert cal.decision_deadline("crypto", d2) == datetime(2026, 11, 18, 23, 15, tzinfo=UTC)
     r2, _ = crypto_run(conn, d2, clients, at=cal.decision_deadline("crypto", d2) + timedelta(minutes=1))
-    assert not r2.decided and r2.exit_code == 1
+    assert not r2.decided and r2.status == "missed" and r2.exit_code == 0
     assert r2.agents["C0"].settle == "settled"           # day 1's orders still filled and marked
+    assert r2.agents["C0"].placed == "placed"            # the margin check ran (long only: nothing to cut)
     assert conn.execute("SELECT COUNT(*) FROM decisions").fetchone()[0] == 2   # day 1's only
 
 

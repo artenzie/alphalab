@@ -228,6 +228,12 @@ def is_settled(conn: sqlite3.Connection, agent_id: str, day: date) -> bool:
                         (agent_id, day.isoformat())).fetchone() is not None
 
 
+def moved_past(conn: sqlite3.Connection, agent_id: str, day: date) -> bool:
+    """A mark after `day` exists for the agent: the ledger has moved past it."""
+    return conn.execute("SELECT 1 FROM equity WHERE agent_id = ? AND as_of_date > ? LIMIT 1",
+                        (agent_id, day.isoformat())).fetchone() is not None
+
+
 def final_decision(conn: sqlite3.Connection, agent_id: str, snapshot_id: int) -> sqlite3.Row | None:
     return conn.execute("""SELECT * FROM decisions WHERE agent_id = ? AND snapshot_id = ? AND corrects_id IS NULL
                            ORDER BY attempt DESC, decision_id DESC LIMIT 1""", (agent_id, snapshot_id)).fetchone()
@@ -319,7 +325,7 @@ class RunReport:
     run_id: str
     asset_class: str
     day: date
-    status: str = "ok"                    # 'ok' | 'error' | 'market_closed'
+    status: str = "ok"                    # 'ok' | 'missed' (past the deadline: held, settled, marked) | 'error' | 'market_closed'
     late: bool = False
     minutes_late: int = 0
     snapshot_id: int | None = None
@@ -352,10 +358,12 @@ class _Day:
 
     # -- steps --
 
-    def data(self, exp: ex.Experiment) -> datetime:
-        """Steps 0-1: fill bars (crypto) and daily bars, unless the day is already fully stored."""
+    def data(self, exp: ex.Experiment, deadline: datetime) -> datetime:
+        """Steps 0-1: fill bars (crypto) and daily bars, unless the day is already fully stored
+        (every agent settled and the snapshot stored, or past the deadline: no snapshot is built)."""
         all_settled = all(is_settled(self.conn, a, self.day) for a in self.ids)
-        done = all_settled and stored_snapshot(self.conn, self.ac, self.day) is not None
+        done = all_settled and (stored_snapshot(self.conn, self.ac, self.day) is not None
+                                or self.deps.now() > deadline)
         if self.crypto and self.day > exp.start_date:            # D-1's orders fill at these bars
             prev = self.day - timedelta(days=1)
             if all_settled:
@@ -370,7 +378,7 @@ class _Day:
                     if self.deps.fill_prices(self.conn, [prev], self.hb.run_id, self.deps.now, ws) != 0:
                         self.hb.errors.append("fetch_fill_prices: failed (see its heartbeat)")
         if done:
-            self.hb("fetch_prices", "finished", skipped="snapshot stored and every agent settled")
+            self.hb("fetch_prices", "finished", skipped="every agent settled, and the snapshot stored or past the deadline")
         elif self.deps.ingest is None:
             self.hb("fetch_prices", "error", error="no ingest dependency")
         else:
@@ -419,7 +427,7 @@ class _Day:
                 self._late(payload)
                 return snap, row["snapshot_id"], bool(row["checks_passed"])
             if self.deps.now() > deadline:
-                self.hb("build_snapshot", "error", reason="past the decision deadline: no snapshot, no decisions",
+                self.hb("build_snapshot", "finished", skipped="past the decision deadline: no snapshot, no decisions",
                         deadline=db.utc_ts(deadline))
                 return None, None, False
             late = data_done_at > times.snapshot_at
@@ -448,29 +456,53 @@ class _Day:
         self.report.late = bool(payload.get("late"))
         self.report.minutes_late = int(payload.get("minutes_late", 0))
 
-    def margin_only(self, settled: set[str], window: tuple[datetime, datetime], deadline: datetime, why: str):
-        """No decisions today: each settled agent still gets the margin check (§7 rule 8), before the deadline."""
+    def margin_only(self, settled: set[str], window: tuple[datetime, datetime], deadline: datetime, why: str,
+                    decide_at: datetime) -> None:
+        """No decisions today: each settled agent still gets the margin check (§7 rule 8).
+
+        Before the deadline its orders are stamped now. Past it (protocol v1.17) the check applies on the
+        protocol schedule: orders and risk events are stamped at the day's protocol decision time, so
+        they fill at the next open like any other, and the real computation time goes in the risk
+        event detail and the heartbeat. A day the ledger has already moved past (a later mark exists,
+        left by the code before v1.17) is checked without writing: no breach is recorded as checked
+        late; a breach is an error for a manual correction entry."""
+        late = self.deps.now() > deadline
         for aid in sorted(settled, key=_order):
             rep = self.report.agents[aid]
             rep.decision = "not decided"
             rep.reason = why
-            if self.deps.now() > deadline:
-                rep.placed = "past deadline"
-                continue
             if already_placed(self.conn, aid, *window):
                 rep.placed = "already_placed"
                 continue
+            computed_at = self.deps.now()
             try:
                 acct = LD.load_account(self.conn, aid, as_of=self.day)
-                bars = LD.day_bars(self.conn, sorted(acct.positions), self.day, self.deps.now())
+                bars = LD.day_bars(self.conn, sorted(acct.positions), self.day, computed_at)
                 closes = {s: bars[s]["close"] for s in acct.positions}
-                placed = LD.place_orders(self.conn, aid, self.day, closes, None, self.deps.now())
+                if late and moved_past(self.conn, aid, self.day):
+                    _, mk = L.mark(acct, closes, self.day)
+                    _, events = L.margin_orders(acct, mk, closes)
+                    if events:
+                        rep.placed = "breach found late"
+                        self.hb(f"place_orders:{aid}", "error", agent_id=aid, hold=True, checked_late=True,
+                                computed_at=db.utc_ts(computed_at),
+                                error=f"margin breach on {self.day} found after later days were settled: "
+                                      f"needs a manual correction entry ({len(events)} event(s))")
+                        continue
+                    rep.placed = "margin ok (checked late)"
+                    self.hb(f"place_orders:{aid}", "finished", agent_id=aid, status="checked_late", hold=True,
+                            orders=0, margin_events=0, computed_at=db.utc_ts(computed_at))
+                    continue
+                placed = LD.place_orders(self.conn, aid, self.day, closes, None,
+                                         decide_at if late else computed_at,
+                                         computed_at=computed_at if late else None)
             except Exception as exc:  # noqa: BLE001
                 self.hb(f"place_orders:{aid}", "error", agent_id=aid, error=_err(exc))
                 continue
             rep.placed, rep.orders = placed.status, placed.orders
             self.hb(f"place_orders:{aid}", "finished", agent_id=aid, status=placed.status, hold=True,
-                    orders=len(placed.orders), margin_events=len(placed.margin_events))
+                    orders=len(placed.orders), margin_events=len(placed.margin_events),
+                    **({"created_at": db.utc_ts(decide_at), "computed_at": db.utc_ts(computed_at)} if late else {}))
 
     def decide(self, snap, sid: int, settled: set[str], exp: ex.Experiment, times: cal.DailyTimes,
                deadline: datetime, window: tuple[datetime, datetime]) -> None:
@@ -892,19 +924,21 @@ def run_day(conn: sqlite3.Connection, asset_class: str, day: date | None = None,
         window = (times.snapshot_at, deadline + cal.LATE_MARGIN)
 
         wait_until(times.bars_fetch_at, deps)
-        data_done_at = d.data(exp)
+        data_done_at = d.data(exp, deadline)
         settled = d.settle()
         snap, sid, passed = d.snapshot(times, data_done_at, deadline)
         rep.snapshot_id, rep.checks_passed = sid, passed if sid is not None else None
-        if snap is None or not passed or deps.now() > deadline:
-            why = ("past the decision deadline" if deps.now() > deadline else
+        past_deadline = deps.now() > deadline
+        if snap is None or not passed or past_deadline:
+            why = ("past the decision deadline" if past_deadline else
                    "no snapshot" if snap is None else "snapshot failed its data checks")
-            hb("decide", "error", reason=f"{why}: no agent decides today", snapshot_id=sid,
-               deadline=db.utc_ts(deadline))
+            # past the deadline the day is a hold by protocol (§3): missed, not an error
+            hb("decide", "finished" if past_deadline else "error", reason=f"{why}: no agent decides today",
+               snapshot_id=sid, deadline=db.utc_ts(deadline), **({"missed": True} if past_deadline else {}))
             for aid in d.ids:
                 if sid is not None:
                     d._fill_from_store(aid, sid)
-            d.margin_only(settled, window, deadline, why)
+            d.margin_only(settled, window, deadline, why, times.decide_at)
         else:
             d.decide(snap, sid, settled, exp, times, deadline, window)
     except Exception as exc:  # noqa: BLE001 - an unexpected failure still ends with an error heartbeat
@@ -913,7 +947,9 @@ def run_day(conn: sqlite3.Connection, asset_class: str, day: date | None = None,
         rep.status = "error"
         return rep
     rep.errors = list(hb.errors)
-    rep.status = "error" if rep.errors else "ok"
+    if set(d.ids) - settled:                  # an agent without its mark is never a finished day
+        rep.errors.append("settle: not every agent is marked")
+    rep.status = "error" if rep.errors else "missed" if past_deadline else "ok"
     hb(JOB, "error" if rep.errors else "finished", status=rep.status, errors=rep.errors, late=rep.late,
        minutes_late=rep.minutes_late, snapshot_id=sid, checks_passed=rep.checks_passed,
        agents={a: {"decision": r.decision, "orders": len(r.orders), "placed": r.placed}
